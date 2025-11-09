@@ -115,13 +115,29 @@ class TradingManager:
                 result = self._close_positions()
                 self.current_position = None
             elif signal in ["LONG_S1_SHORT_S2", "SHORT_S1_LONG_S2"]:
-                # Don't enter new position if already in one
-                if self.current_position is not None and self.current_position != signal:
-                    logger.info(
-                        f"Already in position {self.current_position}, closing before entering new one"
-                    )
-                    self._close_positions()
+                # Check if we already have an open position
+                if self.current_position is not None:
+                    if self.current_position == signal:
+                        # Same position already open - ignore duplicate signal
+                        logger.info(
+                            f"Position {self.current_position} already open, ignoring duplicate entry signal"
+                        )
+                        return {
+                            "status": "success",
+                            "signal": signal,
+                            "action": "none",
+                            "message": "Position already open",
+                            "timestamp": datetime.utcnow().isoformat(),
+                        }
+                    else:
+                        # Different position - close old one first
+                        logger.info(
+                            f"Already in position {self.current_position}, closing before entering new one"
+                        )
+                        self._close_positions()
+                        self.current_position = None
 
+                # Only execute entry if no position exists
                 result = self._execute_entry_signal(signal)
                 if result["status"] == "success":
                     self.current_position = signal
