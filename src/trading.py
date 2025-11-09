@@ -407,12 +407,14 @@ class TradingManager:
                     has_any_position = True
                     entry_price = pos_data.get("entry_price", 0)
                     unrealized_pnl = pos_data.get("unrealized_pnl", 0)
-                    leverage = pos_data.get("leverage", 1)
                     side = "LONG" if position_amt > 0 else "SHORT"
+
+                    # Calculate notional position size
+                    notional = abs(position_amt) * entry_price
 
                     logger.info(
                         f"{symbol}: {side} | Size: {abs(position_amt):.4f} | "
-                        f"Entry: ${entry_price:.4f} | Leverage: {leverage}x | "
+                        f"Entry: ${entry_price:.4f} | Notional: ${notional:.2f} | "
                         f"Unrealized PnL: ${unrealized_pnl:+.2f}"
                     )
 
