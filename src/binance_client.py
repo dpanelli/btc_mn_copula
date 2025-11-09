@@ -1,0 +1,358 @@
+"""Binance Futures API client wrapper."""
+
+from datetime import datetime, timedelta
+from typing import Dict, List, Optional
+
+import pandas as pd
+from binance.client import Client
+from binance.enums import *
+
+from .logger import get_logger
+
+logger = get_logger(__name__)
+
+
+class BinanceClient:
+    """Wrapper for Binance Futures API operations."""
+
+    def __init__(self, api_key: str, api_secret: str, testnet: bool = True):
+        """
+        Initialize Binance client.
+
+        Args:
+            api_key: Binance API key
+            api_secret: Binance API secret
+            testnet: Use testnet if True, live trading if False
+        """
+        self.testnet = testnet
+        if testnet:
+            self.client = Client(
+                api_key=api_key,
+                api_secret=api_secret,
+                testnet=True,
+            )
+            logger.info("Initialized Binance Futures TESTNET client")
+        else:
+            self.client = Client(api_key=api_key, api_secret=api_secret)
+            logger.warning("Initialized Binance Futures LIVE client - real money at risk!")
+
+    def get_historical_klines(
+        self,
+        symbol: str,
+        interval: str,
+        start_time: datetime,
+        end_time: Optional[datetime] = None,
+    ) -> pd.DataFrame:
+        """
+        Fetch historical kline/candlestick data with automatic pagination.
+
+        Binance API has a limit of 1500 klines per request. This method automatically
+        handles pagination to fetch longer time periods (e.g., 21 days of 5-min data).
+
+        Args:
+            symbol: Trading pair symbol (e.g., 'BTCUSDT')
+            interval: Kline interval (e.g., '5m', '1h')
+            start_time: Start time for historical data
+            end_time: End time for historical data (default: now)
+
+        Returns:
+            DataFrame with columns: timestamp, open, high, low, close, volume
+        """
+        try:
+            if end_time is None:
+                end_time = datetime.utcnow()
+
+            logger.debug(
+                f"Fetching klines for {symbol} from {start_time} to {end_time}, interval={interval}"
+            )
+
+            # Convert end time to milliseconds
+            end_ms = int(end_time.timestamp() * 1000)
+
+            # Collect all klines across multiple requests (pagination)
+            all_klines = []
+            current_start = start_time
+            batch_count = 0
+
+            while current_start < end_time:
+                batch_count += 1
+                start_ms = int(current_start.timestamp() * 1000)
+
+                # Fetch batch of up to 1500 klines
+                klines = self.client.futures_klines(
+                    symbol=symbol,
+                    interval=interval,
+                    startTime=start_ms,
+                    endTime=end_ms,
+                    limit=1500,  # Max per request
+                )
+
+                if not klines:
+                    # No more data available
+                    break
+
+                all_klines.extend(klines)
+                logger.debug(
+                    f"Batch {batch_count}: Fetched {len(klines)} klines for {symbol}"
+                )
+
+                # Check if we got less than 1500 klines (reached the end)
+                if len(klines) < 1500:
+                    break
+
+                # Update start time for next batch: use last candle's close_time + 1ms
+                last_close_time_ms = int(klines[-1][6])
+                current_start = datetime.fromtimestamp(last_close_time_ms / 1000) + timedelta(
+                    milliseconds=1
+                )
+
+                # Safety check: prevent infinite loop
+                if current_start >= end_time:
+                    break
+
+            if not all_klines:
+                logger.warning(f"No klines returned for {symbol}")
+                return pd.DataFrame()
+
+            logger.info(
+                f"Fetched {len(all_klines)} total klines for {symbol} across {batch_count} batch(es)"
+            )
+
+            # Convert to DataFrame
+            df = pd.DataFrame(
+                all_klines,
+                columns=[
+                    "timestamp",
+                    "open",
+                    "high",
+                    "low",
+                    "close",
+                    "volume",
+                    "close_time",
+                    "quote_volume",
+                    "trades",
+                    "taker_buy_base",
+                    "taker_buy_quote",
+                    "ignore",
+                ],
+            )
+
+            # Filter out incomplete candles (last candle might still be forming)
+            # A candle is complete when close_time <= current time
+            if len(df) > 0:
+                current_time_ms = int(datetime.utcnow().timestamp() * 1000)
+                df["close_time"] = pd.to_numeric(df["close_time"], errors="coerce")
+
+                # Keep only candles that have closed
+                initial_count = len(df)
+                df = df[df["close_time"] <= current_time_ms].copy()
+
+                if len(df) < initial_count:
+                    logger.debug(
+                        f"Filtered out {initial_count - len(df)} incomplete candle(s) for {symbol}"
+                    )
+
+            # Keep only relevant columns
+            df = df[["timestamp", "open", "high", "low", "close", "volume"]]
+
+            # Convert types
+            df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
+            for col in ["open", "high", "low", "close", "volume"]:
+                df[col] = pd.to_numeric(df[col], errors="coerce")
+
+            logger.info(f"Returning {len(df)} complete klines for {symbol}")
+            return df
+
+        except Exception as e:
+            logger.error(f"Error fetching klines for {symbol}: {e}")
+            raise
+
+    def get_current_price(self, symbol: str) -> float:
+        """
+        Get current market price for a symbol.
+
+        Args:
+            symbol: Trading pair symbol
+
+        Returns:
+            Current price as float
+        """
+        try:
+            ticker = self.client.futures_symbol_ticker(symbol=symbol)
+            price = float(ticker["price"])
+            logger.debug(f"Current price for {symbol}: {price}")
+            return price
+        except Exception as e:
+            logger.error(f"Error fetching price for {symbol}: {e}")
+            raise
+
+    def set_leverage(self, symbol: str, leverage: int) -> None:
+        """
+        Set leverage for a symbol.
+
+        Args:
+            symbol: Trading pair symbol
+            leverage: Leverage multiplier (1-125)
+        """
+        try:
+            result = self.client.futures_change_leverage(symbol=symbol, leverage=leverage)
+            logger.info(f"Set leverage for {symbol} to {leverage}x: {result}")
+        except Exception as e:
+            logger.error(f"Error setting leverage for {symbol}: {e}")
+            raise
+
+    def place_market_order(
+        self, symbol: str, side: str, quantity: float
+    ) -> Dict:
+        """
+        Place a market order.
+
+        Args:
+            symbol: Trading pair symbol
+            side: Order side ('BUY' or 'SELL')
+            quantity: Order quantity in base asset
+
+        Returns:
+            Order response dict
+        """
+        try:
+            logger.info(f"Placing market {side} order for {symbol}: {quantity}")
+
+            order = self.client.futures_create_order(
+                symbol=symbol,
+                side=side,
+                type=ORDER_TYPE_MARKET,
+                quantity=quantity,
+            )
+
+            logger.info(f"Order placed successfully: {order}")
+            return order
+
+        except Exception as e:
+            logger.error(f"Error placing market order for {symbol}: {e}")
+            raise
+
+    def get_position(self, symbol: str) -> Optional[Dict]:
+        """
+        Get current position for a symbol.
+
+        Args:
+            symbol: Trading pair symbol
+
+        Returns:
+            Position dict with keys: symbol, positionAmt, entryPrice, unRealizedProfit
+            Returns None if no position exists
+        """
+        try:
+            positions = self.client.futures_position_information(symbol=symbol)
+            for pos in positions:
+                if float(pos["positionAmt"]) != 0:
+                    logger.debug(f"Position for {symbol}: {pos}")
+                    return {
+                        "symbol": pos["symbol"],
+                        "position_amt": float(pos["positionAmt"]),
+                        "entry_price": float(pos["entryPrice"]),
+                        "unrealized_pnl": float(pos["unRealizedProfit"]),
+                        "leverage": int(pos["leverage"]),
+                    }
+            logger.debug(f"No position for {symbol}")
+            return None
+
+        except Exception as e:
+            logger.error(f"Error fetching position for {symbol}: {e}")
+            raise
+
+    def close_position(self, symbol: str) -> Optional[Dict]:
+        """
+        Close an open position by placing an opposing market order.
+
+        Args:
+            symbol: Trading pair symbol
+
+        Returns:
+            Order response dict, or None if no position to close
+        """
+        try:
+            position = self.get_position(symbol)
+            if position is None:
+                logger.info(f"No position to close for {symbol}")
+                return None
+
+            position_amt = position["position_amt"]
+            if position_amt == 0:
+                logger.info(f"Position already flat for {symbol}")
+                return None
+
+            # Determine side to close position (opposite of current)
+            side = SIDE_SELL if position_amt > 0 else SIDE_BUY
+            quantity = abs(position_amt)
+
+            logger.info(f"Closing position for {symbol}: {side} {quantity}")
+            return self.place_market_order(symbol, side, quantity)
+
+        except Exception as e:
+            logger.error(f"Error closing position for {symbol}: {e}")
+            raise
+
+    def get_account_balance(self) -> float:
+        """
+        Get USDT balance from Futures account.
+
+        Returns:
+            Available USDT balance
+        """
+        try:
+            account = self.client.futures_account()
+            for asset in account["assets"]:
+                if asset["asset"] == "USDT":
+                    balance = float(asset["availableBalance"])
+                    logger.debug(f"USDT balance: {balance}")
+                    return balance
+            return 0.0
+        except Exception as e:
+            logger.error(f"Error fetching account balance: {e}")
+            raise
+
+    def calculate_position_size(
+        self, symbol: str, capital_usdt: float, leverage: int
+    ) -> float:
+        """
+        Calculate position size in base currency given capital and leverage.
+
+        Args:
+            symbol: Trading pair symbol
+            capital_usdt: Capital to allocate in USDT
+            leverage: Leverage multiplier
+
+        Returns:
+            Position size in base currency (rounded to symbol precision)
+        """
+        try:
+            price = self.get_current_price(symbol)
+            # Position value = capital * leverage
+            position_value = capital_usdt * leverage
+            # Position size in base currency
+            position_size = position_value / price
+
+            # Get symbol info for precision
+            exchange_info = self.client.futures_exchange_info()
+            for s in exchange_info["symbols"]:
+                if s["symbol"] == symbol:
+                    # Get quantity precision
+                    for f in s["filters"]:
+                        if f["filterType"] == "LOT_SIZE":
+                            step_size = float(f["stepSize"])
+                            # Round to step size
+                            position_size = round(position_size / step_size) * step_size
+                            break
+                    break
+
+            logger.debug(
+                f"Position size for {symbol}: {position_size} "
+                f"(capital={capital_usdt}, leverage={leverage}, price={price})"
+            )
+            return position_size
+
+        except Exception as e:
+            logger.error(f"Error calculating position size for {symbol}: {e}")
+            raise
