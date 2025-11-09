@@ -252,7 +252,9 @@ def main():
     # Print next scheduled runs
     logger.info("\nNext scheduled jobs:")
     for job in scheduler.get_jobs():
-        logger.info(f"  - {job.name}: {job.next_run_time}")
+        # Use trigger.get_next_fire_time() since scheduler hasn't started yet
+        next_run = job.trigger.get_next_fire_time(None, datetime.now(job.trigger.timezone))
+        logger.info(f"  - {job.name}: {next_run}")
 
     logger.info("\n" + "=" * 100)
     logger.info("BOT IS NOW RUNNING")
