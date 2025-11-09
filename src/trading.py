@@ -79,6 +79,10 @@ class TradingManager:
         logger.info(f"TRADING CYCLE: {datetime.utcnow().isoformat()}")
         logger.info("-" * 80)
 
+        # Log current positions and PnL at start of each cycle
+        self._log_positions_and_pnl()
+        logger.info("")  # Blank line for readability
+
         try:
             # Fetch current prices
             btc_price = self.binance_client.get_current_price(self.btc_symbol)
@@ -113,14 +117,23 @@ class TradingManager:
             # Execute trades based on signal
             if signal == "CLOSE":
                 result = self._close_positions()
-                self.current_position = None
+                # Verify positions are closed by querying Binance
+                if not self._has_open_positions():
+                    self.current_position = None
+                else:
+                    logger.warning("Positions not fully closed after CLOSE signal")
             elif signal in ["LONG_S1_SHORT_S2", "SHORT_S1_LONG_S2"]:
-                # Check if we already have an open position
-                if self.current_position is not None:
-                    if self.current_position == signal:
+                # Query Binance for actual positions (avoid using local state)
+                has_positions = self._has_open_positions()
+
+                if has_positions:
+                    current_position_type = self._get_current_position_type()
+
+                    if current_position_type == signal:
                         # Same position already open - ignore duplicate signal
                         logger.info(
-                            f"Position {self.current_position} already open, ignoring duplicate entry signal"
+                            f"Position {signal} already open (verified with Binance), "
+                            f"ignoring duplicate entry signal"
                         )
                         return {
                             "status": "success",
@@ -132,15 +145,25 @@ class TradingManager:
                     else:
                         # Different position - close old one first
                         logger.info(
-                            f"Already in position {self.current_position}, closing before entering new one"
+                            f"Already in position {current_position_type} (verified with Binance), "
+                            f"closing before entering new one"
                         )
                         self._close_positions()
-                        self.current_position = None
+                        # Verify closed
+                        if not self._has_open_positions():
+                            self.current_position = None
+                        else:
+                            logger.warning("Failed to close positions before entering new trade")
 
                 # Only execute entry if no position exists
                 result = self._execute_entry_signal(signal)
+                # Verify entry succeeded by querying Binance
                 if result["status"] == "success":
-                    self.current_position = signal
+                    if self._has_open_positions():
+                        self.current_position = signal
+                    else:
+                        logger.error("Entry reported success but no positions detected on Binance")
+                        self.current_position = None
             else:
                 logger.warning(f"Unknown signal: {signal}")
                 return {
@@ -300,3 +323,117 @@ class TradingManager:
         except Exception as e:
             logger.error(f"Error fetching account info: {e}")
             return {"error": str(e)}
+
+    def _has_open_positions(self) -> bool:
+        """
+        Check if any positions are open on Binance (queries actual positions).
+
+        Returns:
+            True if any position exists, False otherwise
+        """
+        if self.copula_model is None:
+            return False
+
+        positions = self.get_current_positions()
+        for symbol, pos_data in positions.items():
+            if "error" not in pos_data and pos_data.get("position_amt", 0) != 0:
+                return True
+        return False
+
+    def _get_current_position_type(self) -> Optional[str]:
+        """
+        Determine current position type from Binance positions.
+
+        Returns:
+            'LONG_S1_SHORT_S2', 'SHORT_S1_LONG_S2', or None
+        """
+        if self.copula_model is None:
+            return None
+
+        positions = self.get_current_positions()
+        alt1_pos = positions.get(self.copula_model.spread_pair.alt1, {})
+        alt2_pos = positions.get(self.copula_model.spread_pair.alt2, {})
+
+        alt1_amt = alt1_pos.get("position_amt", 0)
+        alt2_amt = alt2_pos.get("position_amt", 0)
+
+        # Determine position type based on signs
+        if alt1_amt > 0 and alt2_amt < 0:
+            return "LONG_S1_SHORT_S2"
+        elif alt1_amt < 0 and alt2_amt > 0:
+            return "SHORT_S1_LONG_S2"
+        elif alt1_amt == 0 and alt2_amt == 0:
+            return None
+        else:
+            logger.warning(
+                f"Inconsistent positions: {self.copula_model.spread_pair.alt1}={alt1_amt}, "
+                f"{self.copula_model.spread_pair.alt2}={alt2_amt}"
+            )
+            return None
+
+    def _log_positions_and_pnl(self) -> None:
+        """
+        Log detailed position and PnL information from Binance.
+        Logs each position (symbol, size, side, PnL) and total account PnL.
+        """
+        if self.copula_model is None:
+            logger.info("Position Status: No active pair (waiting for formation)")
+            return
+
+        try:
+            # Get positions from Binance
+            positions = self.get_current_positions()
+
+            logger.info("=" * 60)
+            logger.info("CURRENT POSITIONS & PnL")
+            logger.info("=" * 60)
+
+            total_unrealized_pnl = 0.0
+            has_any_position = False
+
+            # Log each leg
+            for symbol in [self.copula_model.spread_pair.alt1, self.copula_model.spread_pair.alt2]:
+                pos_data = positions.get(symbol, {})
+
+                if "error" in pos_data:
+                    logger.error(f"{symbol}: Error fetching position - {pos_data['error']}")
+                    continue
+
+                position_amt = pos_data.get("position_amt", 0)
+
+                if position_amt == 0:
+                    logger.info(f"{symbol}: FLAT (no position)")
+                else:
+                    has_any_position = True
+                    entry_price = pos_data.get("entry_price", 0)
+                    unrealized_pnl = pos_data.get("unrealized_pnl", 0)
+                    leverage = pos_data.get("leverage", 1)
+                    side = "LONG" if position_amt > 0 else "SHORT"
+
+                    logger.info(
+                        f"{symbol}: {side} | Size: {abs(position_amt):.4f} | "
+                        f"Entry: ${entry_price:.4f} | Leverage: {leverage}x | "
+                        f"Unrealized PnL: ${unrealized_pnl:+.2f}"
+                    )
+
+                    total_unrealized_pnl += unrealized_pnl
+
+            # Log total PnL
+            logger.info("-" * 60)
+            if has_any_position:
+                logger.info(f"TOTAL UNREALIZED PnL: ${total_unrealized_pnl:+.2f}")
+
+                # Also log local state vs reality
+                local_state = self.current_position
+                binance_state = self._get_current_position_type()
+                if local_state != binance_state:
+                    logger.warning(
+                        f"STATE MISMATCH: Local={local_state}, Binance={binance_state}"
+                    )
+            else:
+                logger.info("TOTAL UNREALIZED PnL: $0.00 (no open positions)")
+
+            logger.info("=" * 60)
+
+        except Exception as e:
+            logger.error(f"Error logging positions and PnL: {e}", exc_info=True)
