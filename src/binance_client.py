@@ -202,7 +202,7 @@ class BinanceClient:
             raise
 
     def place_market_order(
-        self, symbol: str, side: str, quantity: float
+        self, symbol: str, side: str, quantity: float, reduce_only: bool = False
     ) -> Dict:
         """
         Place a market order.
@@ -211,19 +211,29 @@ class BinanceClient:
             symbol: Trading pair symbol
             side: Order side ('BUY' or 'SELL')
             quantity: Order quantity in base asset
+            reduce_only: If True, order can only reduce position (prevents flipping), default: False
 
         Returns:
             Order response dict
         """
         try:
-            logger.info(f"Placing market {side} order for {symbol}: {quantity}")
-
-            order = self.client.futures_create_order(
-                symbol=symbol,
-                side=side,
-                type=ORDER_TYPE_MARKET,
-                quantity=quantity,
+            logger.info(
+                f"Placing market {side} order for {symbol}: {quantity} "
+                f"(reduceOnly={reduce_only})"
             )
+
+            order_params = {
+                "symbol": symbol,
+                "side": side,
+                "type": ORDER_TYPE_MARKET,
+                "quantity": quantity,
+            }
+
+            # Add reduceOnly if requested (string value required by Binance API)
+            if reduce_only:
+                order_params["reduceOnly"] = "true"
+
+            order = self.client.futures_create_order(**order_params)
 
             logger.info(f"Order placed successfully: {order}")
             return order
@@ -264,7 +274,10 @@ class BinanceClient:
 
     def close_position(self, symbol: str) -> Optional[Dict]:
         """
-        Close an open position by placing an opposing market order.
+        Close an open position by placing an opposing market order with reduceOnly=True.
+
+        Uses reduceOnly flag to ensure the order can ONLY reduce the position,
+        preventing accidental position flips due to timing, rounding, or state issues.
 
         Args:
             symbol: Trading pair symbol
@@ -287,8 +300,8 @@ class BinanceClient:
             side = SIDE_SELL if position_amt > 0 else SIDE_BUY
             quantity = abs(position_amt)
 
-            logger.info(f"Closing position for {symbol}: {side} {quantity}")
-            return self.place_market_order(symbol, side, quantity)
+            logger.info(f"Closing position for {symbol}: {side} {quantity} (reduceOnly=True)")
+            return self.place_market_order(symbol, side, quantity, reduce_only=True)
 
         except Exception as e:
             logger.error(f"Error closing position for {symbol}: {e}")
