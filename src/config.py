@@ -54,6 +54,15 @@ class LoggingConfig:
 
 
 @dataclass
+class TelegramConfig:
+    """Telegram notification configuration."""
+
+    bot_token: str
+    chat_id: str
+    enabled: bool
+
+
+@dataclass
 class Config:
     """Main application configuration."""
 
@@ -61,6 +70,7 @@ class Config:
     trading: TradingConfig
     scheduler: SchedulerConfig
     logging: LoggingConfig
+    telegram: TelegramConfig
     state_file: str
 
 
@@ -118,6 +128,17 @@ def load_config() -> Config:
         log_backup_count=int(os.getenv("LOG_BACKUP_COUNT", "5")),
     )
 
+    # Telegram configuration (optional)
+    telegram_bot_token = os.getenv("TELEGRAM_BOT_TOKEN", "")
+    telegram_chat_id = os.getenv("TELEGRAM_CHAT_ID", "")
+    telegram_enabled = bool(telegram_bot_token and telegram_chat_id)
+
+    telegram_config = TelegramConfig(
+        bot_token=telegram_bot_token,
+        chat_id=telegram_chat_id,
+        enabled=telegram_enabled,
+    )
+
     # State file
     state_file = os.getenv("STATE_FILE", "state/state.json")
 
@@ -126,6 +147,7 @@ def load_config() -> Config:
         trading=trading_config,
         scheduler=scheduler_config,
         logging=logging_config,
+        telegram=telegram_config,
         state_file=state_file,
     )
 

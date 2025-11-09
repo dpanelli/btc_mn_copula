@@ -13,6 +13,7 @@ from src.config import get_config
 from src.formation import FormationManager
 from src.logger import get_logger, setup_logger
 from src.state_manager import StateManager
+from src.telegram_notifier import TelegramNotifier
 from src.trading import TradingManager
 
 # Global instances
@@ -21,13 +22,14 @@ binance_client = None
 formation_manager = None
 trading_manager = None
 state_manager = None
+telegram_notifier = None
 scheduler = None
 is_formation_running = False  # Lock to prevent trading during formation
 
 
 def initialize_components():
     """Initialize all components with configuration."""
-    global logger, binance_client, formation_manager, trading_manager, state_manager
+    global logger, binance_client, formation_manager, trading_manager, state_manager, telegram_notifier
 
     # Load configuration
     config = get_config()
@@ -70,6 +72,18 @@ def initialize_components():
         interval="5m",  # Use 5-minute candles as per instructions
     )
 
+    # Initialize Telegram notifier (optional)
+    telegram_notifier = None
+    if config.telegram.enabled:
+        telegram_notifier = TelegramNotifier(
+            bot_token=config.telegram.bot_token,
+            chat_id=config.telegram.chat_id,
+            enabled=True,
+        )
+        logger.info("Telegram notifications enabled")
+    else:
+        logger.info("Telegram notifications disabled")
+
     # Initialize trading manager
     trading_manager = TradingManager(
         binance_client=binance_client,
@@ -77,6 +91,7 @@ def initialize_components():
         max_leverage=config.trading.max_leverage,
         entry_threshold=config.trading.entry_threshold,
         exit_threshold=config.trading.exit_threshold,
+        telegram_notifier=telegram_notifier,
     )
 
     # Initialize state manager

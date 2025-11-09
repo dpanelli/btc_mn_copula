@@ -6,6 +6,7 @@ from typing import Dict, Optional
 from .binance_client import BinanceClient
 from .copula_model import CopulaModel, SpreadPair
 from .logger import get_logger
+from .telegram_notifier import TelegramNotifier
 
 logger = get_logger(__name__)
 
@@ -20,6 +21,7 @@ class TradingManager:
         max_leverage: int,
         entry_threshold: float = 0.10,
         exit_threshold: float = 0.10,
+        telegram_notifier: Optional[TelegramNotifier] = None,
     ):
         """
         Initialize trading manager.
@@ -30,12 +32,14 @@ class TradingManager:
             max_leverage: Maximum leverage to use
             entry_threshold: Entry threshold α1 (default 0.10)
             exit_threshold: Exit threshold α2 (default 0.10)
+            telegram_notifier: Optional TelegramNotifier instance for notifications
         """
         self.binance_client = binance_client
         self.capital_per_leg = capital_per_leg
         self.max_leverage = max_leverage
         self.entry_threshold = entry_threshold
         self.exit_threshold = exit_threshold
+        self.telegram_notifier = telegram_notifier
         self.copula_model: Optional[CopulaModel] = None
         self.current_position: Optional[str] = None  # Track current position state
         self.btc_symbol = "BTCUSDT"
@@ -103,6 +107,36 @@ class TradingManager:
             signal = self.copula_model.generate_signal(btc_price, alt1_price, alt2_price)
 
             logger.info(f"Signal: {signal}")
+
+            # Send Telegram notification
+            if self.telegram_notifier:
+                try:
+                    positions = self.get_current_positions()
+
+                    # Calculate total PnL
+                    total_pnl = sum(
+                        pos.get("unrealized_pnl", 0)
+                        for pos in positions.values()
+                        if "error" not in pos
+                    )
+
+                    # Prepare price data
+                    price_data = {
+                        "btc": btc_price,
+                        "alt1": alt1_price,
+                        "alt2": alt2_price,
+                        "alt1_symbol": self.copula_model.spread_pair.alt1,
+                        "alt2_symbol": self.copula_model.spread_pair.alt2,
+                    }
+
+                    self.telegram_notifier.send_trading_update(
+                        positions=positions,
+                        prices=price_data,
+                        signal=signal,
+                        total_pnl=total_pnl,
+                    )
+                except Exception as e:
+                    logger.error(f"Error sending Telegram notification: {e}")
 
             # Check if we need to act on the signal
             if signal == "HOLD":
