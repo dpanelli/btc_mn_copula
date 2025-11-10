@@ -1,10 +1,7 @@
 """Telegram notification module for trading updates."""
 
-import asyncio
+import httpx
 from typing import Dict, Optional
-
-from telegram import Bot
-from telegram.error import TelegramError
 
 from .logger import get_logger
 
@@ -26,31 +23,12 @@ class TelegramNotifier:
         self.bot_token = bot_token
         self.chat_id = chat_id
         self.enabled = enabled
-        self.bot = None
+        self.api_url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
 
         if self.enabled and self.bot_token and self.chat_id:
-            self.bot = Bot(token=self.bot_token)
             logger.info(f"Telegram notifier initialized for chat_id: {self.chat_id}")
         else:
             logger.info("Telegram notifications disabled")
-
-    def _run_async(self, coro):
-        """
-        Run async coroutine in a thread-safe manner.
-
-        Creates a new event loop to avoid conflicts with existing loops,
-        which is important when running in APScheduler threads.
-
-        Args:
-            coro: Coroutine to run
-        """
-        loop = asyncio.new_event_loop()
-        try:
-            asyncio.set_event_loop(loop)
-            return loop.run_until_complete(coro)
-        finally:
-            loop.close()
-            asyncio.set_event_loop(None)
 
     def send_trading_update(
         self,
@@ -68,31 +46,39 @@ class TelegramNotifier:
             signal: Trading signal (HOLD, CLOSE, LONG_S1_SHORT_S2, SHORT_S1_LONG_S2)
             total_pnl: Total unrealized PnL
         """
-        if not self.enabled or not self.bot:
+        if not self.enabled:
             return
 
         try:
             message = self._format_trading_update(positions, prices, signal, total_pnl)
-            self._run_async(self._send_message(message))
+            self._send_message(message)
         except Exception as e:
             logger.error(f"Error sending Telegram notification: {e}")
 
-    async def _send_message(self, message: str) -> None:
+    def _send_message(self, message: str) -> None:
         """
-        Send message asynchronously.
+        Send message via Telegram HTTP API (synchronous).
 
         Args:
             message: Message text to send
         """
         try:
-            await self.bot.send_message(
-                chat_id=self.chat_id,
-                text=message,
-                parse_mode="HTML",
-                disable_web_page_preview=True,
-            )
-        except TelegramError as e:
+            with httpx.Client(timeout=10.0) as client:
+                response = client.post(
+                    self.api_url,
+                    json={
+                        "chat_id": self.chat_id,
+                        "text": message,
+                        "parse_mode": "HTML",
+                        "disable_web_page_preview": True,
+                    },
+                )
+                response.raise_for_status()
+                logger.debug(f"Telegram message sent successfully")
+        except httpx.HTTPError as e:
             logger.error(f"Telegram API error: {e}")
+        except Exception as e:
+            logger.error(f"Error sending Telegram message: {e}")
 
     def _format_trading_update(
         self,
@@ -210,12 +196,12 @@ class TelegramNotifier:
         Args:
             pair_info: Dict with pair selection info (alt1, alt2, tau, rho, etc.)
         """
-        if not self.enabled or not self.bot:
+        if not self.enabled:
             return
 
         try:
             message = self._format_formation_update(pair_info)
-            self._run_async(self._send_message(message))
+            self._send_message(message)
         except Exception as e:
             logger.error(f"Error sending formation notification: {e}")
 
