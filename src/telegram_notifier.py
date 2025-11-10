@@ -34,6 +34,24 @@ class TelegramNotifier:
         else:
             logger.info("Telegram notifications disabled")
 
+    def _run_async(self, coro):
+        """
+        Run async coroutine in a thread-safe manner.
+
+        Creates a new event loop to avoid conflicts with existing loops,
+        which is important when running in APScheduler threads.
+
+        Args:
+            coro: Coroutine to run
+        """
+        loop = asyncio.new_event_loop()
+        try:
+            asyncio.set_event_loop(loop)
+            return loop.run_until_complete(coro)
+        finally:
+            loop.close()
+            asyncio.set_event_loop(None)
+
     def send_trading_update(
         self,
         positions: Dict,
@@ -55,7 +73,7 @@ class TelegramNotifier:
 
         try:
             message = self._format_trading_update(positions, prices, signal, total_pnl)
-            asyncio.run(self._send_message(message))
+            self._run_async(self._send_message(message))
         except Exception as e:
             logger.error(f"Error sending Telegram notification: {e}")
 
@@ -197,7 +215,7 @@ class TelegramNotifier:
 
         try:
             message = self._format_formation_update(pair_info)
-            asyncio.run(self._send_message(message))
+            self._run_async(self._send_message(message))
         except Exception as e:
             logger.error(f"Error sending formation notification: {e}")
 
