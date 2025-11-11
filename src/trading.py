@@ -104,7 +104,8 @@ class TradingManager:
             )
 
             # Generate signal
-            signal = self.copula_model.generate_signal(btc_price, alt1_price, alt2_price)
+            signal_data = self.copula_model.generate_signal(btc_price, alt1_price, alt2_price)
+            signal = signal_data["signal"]  # Extract signal string for backward compatibility
 
             logger.info(f"Signal: {signal}")
 
@@ -134,6 +135,7 @@ class TradingManager:
                         prices=price_data,
                         signal=signal,
                         total_pnl=total_pnl,
+                        signal_data=signal_data,
                     )
                 except Exception as e:
                     logger.error(f"Error sending Telegram notification: {e}")

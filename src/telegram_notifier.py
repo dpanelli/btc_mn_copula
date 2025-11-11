@@ -36,6 +36,7 @@ class TelegramNotifier:
         prices: Dict[str, float],
         signal: str,
         total_pnl: float,
+        signal_data: Optional[Dict] = None,
     ) -> None:
         """
         Send a compact trading cycle update via Telegram.
@@ -45,12 +46,13 @@ class TelegramNotifier:
             prices: Dict with keys 'btc', 'alt1', 'alt2' and their prices
             signal: Trading signal (HOLD, CLOSE, LONG_S1_SHORT_S2, SHORT_S1_LONG_S2)
             total_pnl: Total unrealized PnL
+            signal_data: Optional dict with h_1_given_2, h_2_given_1, exit_threshold, distances
         """
         if not self.enabled:
             return
 
         try:
-            message = self._format_trading_update(positions, prices, signal, total_pnl)
+            message = self._format_trading_update(positions, prices, signal, total_pnl, signal_data)
             self._send_message(message)
         except Exception as e:
             logger.error(f"Error sending Telegram notification: {e}")
@@ -86,6 +88,7 @@ class TelegramNotifier:
         prices: Dict[str, float],
         signal: str,
         total_pnl: float,
+        signal_data: Optional[Dict] = None,
     ) -> str:
         """
         Format trading update message with emojis.
@@ -162,6 +165,34 @@ class TelegramNotifier:
         signal_emoji = self._get_signal_emoji(signal)
         signal_text = self._get_signal_text(signal)
         lines.append(f"🔔 <b>Signal:</b> {signal_emoji} {signal_text}")
+
+        # Exit trigger information (if available)
+        if signal_data:
+            h_1_given_2 = signal_data.get("h_1_given_2")
+            h_2_given_1 = signal_data.get("h_2_given_1")
+            exit_threshold = signal_data.get("exit_threshold")
+
+            if h_1_given_2 is not None and h_2_given_1 is not None:
+                distance_1 = abs(h_1_given_2 - 0.5)
+                distance_2 = abs(h_2_given_1 - 0.5)
+
+                # Determine how close we are to exit
+                max_distance = max(distance_1, distance_2)
+                if max_distance < exit_threshold:
+                    status_icon = "🟢"
+                    status_text = "NEAR EXIT"
+                elif max_distance < exit_threshold * 2:
+                    status_icon = "🟡"
+                    status_text = "APPROACHING EXIT"
+                else:
+                    status_icon = "🔴"
+                    status_text = "FAR FROM EXIT"
+
+                lines.append("")
+                lines.append(f"📉 <b>Exit Trigger:</b> {status_icon} {status_text}")
+                lines.append(f"• Threshold: {exit_threshold:.2f}")
+                lines.append(f"• h₁|₂: {h_1_given_2:.4f} (Δ: {distance_1:.4f})")
+                lines.append(f"• h₂|₁: {h_2_given_1:.4f} (Δ: {distance_2:.4f})")
 
         return "\n".join(lines)
 

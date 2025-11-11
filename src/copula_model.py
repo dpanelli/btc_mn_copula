@@ -206,7 +206,7 @@ class CopulaModel:
 
     def generate_signal(
         self, btc_price: float, alt1_price: float, alt2_price: float
-    ) -> str:
+    ) -> Dict:
         """
         Generate trading signal based on current prices.
 
@@ -216,7 +216,13 @@ class CopulaModel:
             alt2_price: Current price of second altcoin
 
         Returns:
-            Signal: 'LONG_S1_SHORT_S2', 'SHORT_S1_LONG_S2', 'CLOSE', or 'HOLD'
+            Dict containing:
+                - signal: 'LONG_S1_SHORT_S2', 'SHORT_S1_LONG_S2', 'CLOSE', or 'HOLD'
+                - h_1_given_2: Conditional probability of spread 1 given spread 2
+                - h_2_given_1: Conditional probability of spread 2 given spread 1
+                - exit_threshold: Exit threshold value
+                - distance_1: Distance of h_1_given_2 from 0.5
+                - distance_2: Distance of h_2_given_1 from 0.5
         """
         # Calculate current spreads
         s1 = btc_price - self.spread_pair.beta1 * alt1_price
@@ -250,7 +256,14 @@ class CopulaModel:
                 f"(h_1|2={h_1_given_2:.4f} < {self.entry_threshold}, "
                 f"h_2|1={h_2_given_1:.4f} > {1-self.entry_threshold})"
             )
-            return "LONG_S1_SHORT_S2"
+            return {
+                "signal": "LONG_S1_SHORT_S2",
+                "h_1_given_2": h_1_given_2,
+                "h_2_given_1": h_2_given_1,
+                "exit_threshold": self.exit_threshold,
+                "distance_1": abs(h_1_given_2 - 0.5),
+                "distance_2": abs(h_2_given_1 - 0.5),
+            }
 
         elif (
             h_1_given_2 > 1 - self.entry_threshold
@@ -261,7 +274,14 @@ class CopulaModel:
                 f"(h_1|2={h_1_given_2:.4f} > {1-self.entry_threshold}, "
                 f"h_2|1={h_2_given_1:.4f} < {self.entry_threshold})"
             )
-            return "SHORT_S1_LONG_S2"
+            return {
+                "signal": "SHORT_S1_LONG_S2",
+                "h_1_given_2": h_1_given_2,
+                "h_2_given_1": h_2_given_1,
+                "exit_threshold": self.exit_threshold,
+                "distance_1": abs(h_1_given_2 - 0.5),
+                "distance_2": abs(h_2_given_1 - 0.5),
+            }
 
         # Exit signal (both near 0.5)
         elif (
@@ -273,9 +293,23 @@ class CopulaModel:
                 f"(|h_1|2-0.5|={abs(h_1_given_2-0.5):.4f}, "
                 f"|h_2|1-0.5|={abs(h_2_given_1-0.5):.4f} < {self.exit_threshold})"
             )
-            return "CLOSE"
+            return {
+                "signal": "CLOSE",
+                "h_1_given_2": h_1_given_2,
+                "h_2_given_1": h_2_given_1,
+                "exit_threshold": self.exit_threshold,
+                "distance_1": abs(h_1_given_2 - 0.5),
+                "distance_2": abs(h_2_given_1 - 0.5),
+            }
 
-        return "HOLD"
+        return {
+            "signal": "HOLD",
+            "h_1_given_2": h_1_given_2,
+            "h_2_given_1": h_2_given_1,
+            "exit_threshold": self.exit_threshold,
+            "distance_1": abs(h_1_given_2 - 0.5),
+            "distance_2": abs(h_2_given_1 - 0.5),
+        }
 
     def _transform_to_uniform(
         self, value: float, historical_data: np.ndarray
