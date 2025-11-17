@@ -205,12 +205,12 @@ class TelegramNotifier:
 
                     lines.append(f"📈 <b>Entry Trigger:</b> {status_icon} {status_text}")
                     lines.append(f"• Threshold: {entry_threshold:.2f}")
-                    lines.append(f"• h₁|₂: {h_1_given_2:.4f}")
-                    lines.append(f"  - LONG S1: needs < {entry_threshold:.2f} (Δ: {long_distance_1:.4f})")
-                    lines.append(f"  - SHORT S1: needs > {1-entry_threshold:.2f} (Δ: {short_distance_1:.4f})")
-                    lines.append(f"• h₂|₁: {h_2_given_1:.4f}")
-                    lines.append(f"  - LONG S1: needs > {1-entry_threshold:.2f} (Δ: {long_distance_2:.4f})")
-                    lines.append(f"  - SHORT S1: needs < {entry_threshold:.2f} (Δ: {short_distance_2:.4f})")
+                    lines.append(f"• h(1|2): {h_1_given_2:.4f}")
+                    lines.append(f"  - LONG S1: needs &lt; {entry_threshold:.2f} (Δ: {long_distance_1:.4f})")
+                    lines.append(f"  - SHORT S1: needs &gt; {1-entry_threshold:.2f} (Δ: {short_distance_1:.4f})")
+                    lines.append(f"• h(2|1): {h_2_given_1:.4f}")
+                    lines.append(f"  - LONG S1: needs &gt; {1-entry_threshold:.2f} (Δ: {long_distance_2:.4f})")
+                    lines.append(f"  - SHORT S1: needs &lt; {entry_threshold:.2f} (Δ: {short_distance_2:.4f})")
                     lines.append(f"• Closest to {closest_direction}: {min_distance:.4f}")
 
                 else:
@@ -232,8 +232,8 @@ class TelegramNotifier:
 
                     lines.append(f"📉 <b>Exit Trigger:</b> {status_icon} {status_text}")
                     lines.append(f"• Threshold: {exit_threshold:.2f}")
-                    lines.append(f"• h₁|₂: {h_1_given_2:.4f} (Δ from 0.5: {distance_1:.4f})")
-                    lines.append(f"• h₂|₁: {h_2_given_1:.4f} (Δ from 0.5: {distance_2:.4f})")
+                    lines.append(f"• h(1|2): {h_1_given_2:.4f} (Δ from 0.5: {distance_1:.4f})")
+                    lines.append(f"• h(2|1): {h_2_given_1:.4f} (Δ from 0.5: {distance_2:.4f})")
 
         return "\n".join(lines)
 
