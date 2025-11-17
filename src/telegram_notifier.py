@@ -166,33 +166,74 @@ class TelegramNotifier:
         signal_text = self._get_signal_text(signal)
         lines.append(f"🔔 <b>Signal:</b> {signal_emoji} {signal_text}")
 
-        # Exit trigger information (if available)
+        # Entry/Exit trigger information (if available)
         if signal_data:
             h_1_given_2 = signal_data.get("h_1_given_2")
             h_2_given_1 = signal_data.get("h_2_given_1")
+            entry_threshold = signal_data.get("entry_threshold")
             exit_threshold = signal_data.get("exit_threshold")
 
             if h_1_given_2 is not None and h_2_given_1 is not None:
-                distance_1 = abs(h_1_given_2 - 0.5)
-                distance_2 = abs(h_2_given_1 - 0.5)
-
-                # Determine how close we are to exit
-                max_distance = max(distance_1, distance_2)
-                if max_distance < exit_threshold:
-                    status_icon = "🟢"
-                    status_text = "NEAR EXIT"
-                elif max_distance < exit_threshold * 2:
-                    status_icon = "🟡"
-                    status_text = "APPROACHING EXIT"
-                else:
-                    status_icon = "🔴"
-                    status_text = "FAR FROM EXIT"
-
                 lines.append("")
-                lines.append(f"📉 <b>Exit Trigger:</b> {status_icon} {status_text}")
-                lines.append(f"• Threshold: {exit_threshold:.2f}")
-                lines.append(f"• h₁|₂: {h_1_given_2:.4f} (Δ: {distance_1:.4f})")
-                lines.append(f"• h₂|₁: {h_2_given_1:.4f} (Δ: {distance_2:.4f})")
+
+                if not has_positions:
+                    # SHOW ENTRY TRIGGER INFO when FLAT
+                    # LONG S1, SHORT S2: h_1|2 < α₁ AND h_2|1 > 1-α₁
+                    long_distance_1 = abs(h_1_given_2 - entry_threshold) if h_1_given_2 > entry_threshold else 0
+                    long_distance_2 = abs(h_2_given_1 - (1 - entry_threshold)) if h_2_given_1 < (1 - entry_threshold) else 0
+                    long_distance = max(long_distance_1, long_distance_2)
+
+                    # SHORT S1, LONG S2: h_1|2 > 1-α₁ AND h_2|1 < α₁
+                    short_distance_1 = abs(h_1_given_2 - (1 - entry_threshold)) if h_1_given_2 < (1 - entry_threshold) else 0
+                    short_distance_2 = abs(h_2_given_1 - entry_threshold) if h_2_given_1 > entry_threshold else 0
+                    short_distance = max(short_distance_1, short_distance_2)
+
+                    # Use the closest distance
+                    min_distance = min(long_distance, short_distance)
+                    closest_direction = "LONG S1" if long_distance <= short_distance else "SHORT S1"
+
+                    # Status indicators
+                    if min_distance < 0.05:
+                        status_icon = "🟢"
+                        status_text = "NEAR ENTRY"
+                    elif min_distance < 0.10:
+                        status_icon = "🟡"
+                        status_text = "APPROACHING ENTRY"
+                    else:
+                        status_icon = "🔴"
+                        status_text = "FAR FROM ENTRY"
+
+                    lines.append(f"📈 <b>Entry Trigger:</b> {status_icon} {status_text}")
+                    lines.append(f"• Threshold: {entry_threshold:.2f}")
+                    lines.append(f"• h₁|₂: {h_1_given_2:.4f}")
+                    lines.append(f"  - LONG S1: needs < {entry_threshold:.2f} (Δ: {long_distance_1:.4f})")
+                    lines.append(f"  - SHORT S1: needs > {1-entry_threshold:.2f} (Δ: {short_distance_1:.4f})")
+                    lines.append(f"• h₂|₁: {h_2_given_1:.4f}")
+                    lines.append(f"  - LONG S1: needs > {1-entry_threshold:.2f} (Δ: {long_distance_2:.4f})")
+                    lines.append(f"  - SHORT S1: needs < {entry_threshold:.2f} (Δ: {short_distance_2:.4f})")
+                    lines.append(f"• Closest to {closest_direction}: {min_distance:.4f}")
+
+                else:
+                    # SHOW EXIT TRIGGER INFO when positions are open
+                    distance_1 = abs(h_1_given_2 - 0.5)
+                    distance_2 = abs(h_2_given_1 - 0.5)
+
+                    # Determine how close we are to exit
+                    max_distance = max(distance_1, distance_2)
+                    if max_distance < exit_threshold:
+                        status_icon = "🟢"
+                        status_text = "NEAR EXIT"
+                    elif max_distance < exit_threshold * 2:
+                        status_icon = "🟡"
+                        status_text = "APPROACHING EXIT"
+                    else:
+                        status_icon = "🔴"
+                        status_text = "FAR FROM EXIT"
+
+                    lines.append(f"📉 <b>Exit Trigger:</b> {status_icon} {status_text}")
+                    lines.append(f"• Threshold: {exit_threshold:.2f}")
+                    lines.append(f"• h₁|₂: {h_1_given_2:.4f} (Δ from 0.5: {distance_1:.4f})")
+                    lines.append(f"• h₂|₁: {h_2_given_1:.4f} (Δ from 0.5: {distance_2:.4f})")
 
         return "\n".join(lines)
 
