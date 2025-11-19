@@ -161,9 +161,9 @@ class TelegramNotifier:
 
         lines.append("")
 
-        # Signal section
+        # Signal section (position-aware)
         signal_emoji = self._get_signal_emoji(signal)
-        signal_text = self._get_signal_text(signal)
+        signal_text = self._get_signal_text(signal, has_positions)
         lines.append(f"🔔 <b>Signal:</b> {signal_emoji} {signal_text}")
 
         # Entry/Exit trigger information (if available)
@@ -248,12 +248,24 @@ class TelegramNotifier:
         else:
             return "❓"
 
-    def _get_signal_text(self, signal: str) -> str:
-        """Get human-readable signal text."""
+    def _get_signal_text(self, signal: str, has_positions: bool = True) -> str:
+        """Get human-readable signal text (position-aware).
+        
+        Args:
+            signal: Trading signal
+            has_positions: Whether positions are currently open
+            
+        Returns:
+            Human-readable signal text adjusted for position context
+        """
         if signal == "HOLD":
             return "HOLD"
         elif signal == "CLOSE":
-            return "CLOSE POSITIONS"
+            # If FLAT, spreads are at equilibrium but nothing to close
+            if not has_positions:
+                return "HOLD (Spreads at equilibrium)"
+            else:
+                return "CLOSE POSITIONS"
         elif signal == "LONG_S1_SHORT_S2":
             return "LONG S1 / SHORT S2"
         elif signal == "SHORT_S1_LONG_S2":
