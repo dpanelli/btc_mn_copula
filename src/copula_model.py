@@ -182,8 +182,10 @@ def check_cointegration(spread: np.ndarray, significance_level: float = 0.05) ->
             f"KSS_stat={is_kss_stationary}"
         )
         
-        # Require BOTH tests to pass for robust selection
-        return bool(is_eg_stationary and is_kss_stationary)
+        # Require EITHER test to pass (Union of linear and non-linear cointegration)
+        # The paper evaluates both strategies; allowing either ensures we capture
+        # both linearly and non-linearly cointegrated pairs.
+        return bool(is_eg_stationary or is_kss_stationary)
         
     except Exception as e:
         logger.error(f"Error in cointegration test: {e}")
