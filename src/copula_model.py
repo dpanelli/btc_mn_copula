@@ -69,30 +69,122 @@ def calculate_spread(
     return spread, beta
 
 
+def kss_test(series: np.ndarray, significance_level: float = 0.05) -> bool:
+    """
+    Perform Kapetanios-Shin-Snell (KSS) test for non-linear cointegration.
+    
+    Model: Δx_t = γ * x_{t-1}^3 + ε_t
+    Null hypothesis: γ = 0 (non-stationary)
+    Alternative: γ < 0 (stationary, ESTAR process)
+    
+    Critical values for Case 2 (demeaned data) from Kapetanios et al. (2003):
+    1%: -3.48
+    5%: -2.93
+    10%: -2.66
+    
+    Args:
+        series: Time series data
+        significance_level: Significance level (0.01, 0.05, or 0.10)
+        
+    Returns:
+        True if null hypothesis is rejected (stationary), False otherwise
+    """
+    try:
+        # Remove NaN/Inf
+        series = series[~np.isnan(series)]
+        if len(series) < 10:
+            return False
+            
+        # Demean the series (Case 2)
+        x = series - np.mean(series)
+        
+        # Create lagged series
+        x_lag = x[:-1]
+        dx = np.diff(x)
+        
+        # Construct regressor: x_{t-1}^3
+        X = x_lag ** 3
+        y = dx
+        
+        # Run OLS: y = γ * X (no intercept because we demeaned)
+        # γ = (X'X)^-1 X'y
+        # t-stat = γ / SE(γ)
+        
+        # Using numpy for efficiency
+        X = X.reshape(-1, 1)
+        gamma, residuals, rank, s = np.linalg.lstsq(X, y, rcond=None)
+        gamma = gamma[0]
+        
+        # Calculate standard error
+        n = len(y)
+        # Estimate variance of residuals: σ^2 = Σe^2 / (n - 1)
+        # Note: degrees of freedom is n - 1 (1 parameter estimated)
+        sigma2 = np.sum((y - X.flatten() * gamma) ** 2) / (n - 1)
+        
+        # Variance of gamma: Var(γ) = σ^2 * (X'X)^-1
+        xtx_inv = 1 / np.sum(X ** 2)
+        var_gamma = sigma2 * xtx_inv
+        se_gamma = np.sqrt(var_gamma)
+        
+        # t-statistic
+        t_stat = gamma / se_gamma
+        
+        # Critical values (Kapetanios et al. 2003, Table 1, Case 2)
+        if significance_level <= 0.01:
+            critical_value = -3.48
+        elif significance_level <= 0.05:
+            critical_value = -2.93
+        else:
+            critical_value = -2.66
+            
+        is_stationary = bool(t_stat < critical_value)
+        
+        logger.debug(
+            f"KSS test: t-stat={t_stat:.4f}, crit={critical_value}, "
+            f"stationary={is_stationary}"
+        )
+        
+        return is_stationary
+        
+    except Exception as e:
+        logger.error(f"Error in KSS test: {e}")
+        return False
+
+
 def check_cointegration(spread: np.ndarray, significance_level: float = 0.05) -> bool:
     """
-    Test if spread is stationary using Augmented Dickey-Fuller test.
-
+    Test if spread is stationary using both ADF (Engle-Granger) and KSS tests.
+    
     Args:
         spread: Spread series to test
         significance_level: Significance level for rejection (default 0.05)
-
+        
     Returns:
-        True if spread is stationary (cointegrated), False otherwise
+        True if spread passes BOTH tests, False otherwise
     """
     try:
-        # Perform ADF test
+        # 1. Engle-Granger (ADF on residuals)
+        # Note: Since 'spread' is already residuals from OLS, running ADF on it
+        # is equivalent to the second step of EG test.
+        # However, standard ADF critical values are slightly different from EG critical values.
+        # For strict EG, we should use EG critical values (approx -3.34 for 5%).
+        # statsmodels adfuller uses MacKinnon approximate p-values which are generally robust.
+        
         result = adfuller(spread, autolag="AIC")
-        adf_statistic, p_value = result[0], result[1]
-
-        is_stationary = bool(p_value < significance_level)
-
+        adf_stat, p_value = result[0], result[1]
+        is_eg_stationary = bool(p_value < significance_level)
+        
+        # 2. KSS Test (Non-linear)
+        is_kss_stationary = kss_test(spread, significance_level)
+        
         logger.debug(
-            f"ADF test: statistic={adf_statistic:.4f}, p-value={p_value:.4f}, "
-            f"stationary={is_stationary}"
+            f"Cointegration results: EG_p={p_value:.4f} ({is_eg_stationary}), "
+            f"KSS_stat={is_kss_stationary}"
         )
-        return is_stationary
-
+        
+        # Require BOTH tests to pass for robust selection
+        return bool(is_eg_stationary and is_kss_stationary)
+        
     except Exception as e:
         logger.error(f"Error in cointegration test: {e}")
         return False
@@ -357,16 +449,21 @@ class CopulaModel:
             Dict mapping symbol to (side, capital_usdt)
         """
         if signal == "LONG_S1_SHORT_S2":
-            # LONG spread 1 (LONG β1*ALT1), SHORT spread 2 (SHORT β2*ALT2)
-            return {
-                self.spread_pair.alt1: ("BUY", capital_per_leg),
-                self.spread_pair.alt2: ("SELL", capital_per_leg),
-            }
-        elif signal == "SHORT_S1_LONG_S2":
-            # SHORT spread 1 (SHORT β1*ALT1), LONG spread 2 (LONG β2*ALT2)
+            # LONG spread 1 (SELL β1*ALT1), SHORT spread 2 (BUY β2*ALT2)
+            # S1 = BTC - β1*ALT1. To LONG S1 (bet on increase), we need S1 to go up.
+            # Since β1 is positive, we need ALT1 to go DOWN relative to BTC. So we SELL ALT1.
+            # S2 = BTC - β2*ALT2. To SHORT S2 (bet on decrease), we need S2 to go down.
+            # Since β2 is positive, we need ALT2 to go UP relative to BTC. So we BUY ALT2.
             return {
                 self.spread_pair.alt1: ("SELL", capital_per_leg),
                 self.spread_pair.alt2: ("BUY", capital_per_leg),
+            }
+        elif signal == "SHORT_S1_LONG_S2":
+            # SHORT spread 1 (BUY β1*ALT1), LONG spread 2 (SELL β2*ALT2)
+            # Inverse of above.
+            return {
+                self.spread_pair.alt1: ("BUY", capital_per_leg),
+                self.spread_pair.alt2: ("SELL", capital_per_leg),
             }
         elif signal == "CLOSE":
             return {

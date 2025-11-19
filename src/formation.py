@@ -100,6 +100,7 @@ class FormationManager:
             except Exception as e:
                 logger.error(f"Error fetching {alt} data: {e}")
 
+
         if len(altcoin_data) < 2:
             logger.error(
                 f"Insufficient altcoin data: only {len(altcoin_data)} coins available"

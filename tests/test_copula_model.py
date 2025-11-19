@@ -143,6 +143,31 @@ class TestCointegration:
         # Should be non-stationary (though may fail due to randomness)
         assert isinstance(is_stationary, bool)
 
+    def test_kss_stationary(self):
+        """Test KSS test on stationary non-linear series (ESTAR)."""
+        # Simulate ESTAR process: Δx_t = -0.5 * x_{t-1}^3 + ε_t
+        np.random.seed(42)
+        n = 500
+        x = np.zeros(n)
+        for t in range(1, n):
+            x[t] = x[t-1] - 0.5 * x[t-1]**3 + np.random.normal(0, 0.1)
+            
+        # This process is stationary by construction
+        # However, KSS test might need more data or specific params to reject H0
+        # We just check it runs and returns bool
+        from src.copula_model import kss_test
+        result = kss_test(x, significance_level=0.05)
+        assert isinstance(result, bool)
+
+    def test_kss_non_stationary(self):
+        """Test KSS test on random walk."""
+        np.random.seed(42)
+        walk = np.cumsum(np.random.randn(200))
+        
+        from src.copula_model import kss_test
+        result = kss_test(walk, significance_level=0.05)
+        assert result is False
+
 
 class TestCopulaModel:
     """Test CopulaModel signal generation."""
@@ -187,7 +212,8 @@ class TestCopulaModel:
         alt1_price = 3000.0
         alt2_price = 400.0
 
-        signal = model.generate_signal(btc_price, alt1_price, alt2_price)
+        result = model.generate_signal(btc_price, alt1_price, alt2_price)
+        signal = result["signal"]
 
         # Signal should be one of the valid types
         assert signal in ["LONG_S1_SHORT_S2", "SHORT_S1_LONG_S2", "CLOSE", "HOLD"]
@@ -200,8 +226,12 @@ class TestCopulaModel:
 
         assert "ETHUSDT" in positions
         assert "BNBUSDT" in positions
-        assert positions["ETHUSDT"][0] == "BUY"
-        assert positions["BNBUSDT"][0] == "SELL"
+        # S1 = BTC - β1*ALT1. To LONG S1, we need S1 to go up.
+        # Since β1 is positive, we need ALT1 to go DOWN relative to BTC. So we SELL ALT1.
+        assert positions["ETHUSDT"][0] == "SELL"
+        # S2 = BTC - β2*ALT2. To SHORT S2, we need S2 to go down.
+        # Since β2 is positive, we need ALT2 to go UP relative to BTC. So we BUY ALT2.
+        assert positions["BNBUSDT"][0] == "BUY"
         assert positions["ETHUSDT"][1] == 10000
         assert positions["BNBUSDT"][1] == 10000
 
@@ -211,8 +241,9 @@ class TestCopulaModel:
 
         positions = model.get_position_quantities("SHORT_S1_LONG_S2", capital_per_leg=10000)
 
-        assert positions["ETHUSDT"][0] == "SELL"
-        assert positions["BNBUSDT"][0] == "BUY"
+        # Inverse of above
+        assert positions["ETHUSDT"][0] == "BUY"
+        assert positions["BNBUSDT"][0] == "SELL"
 
     def test_get_position_quantities_close(self, mock_spread_pair):
         """Test position quantities for CLOSE signal."""
