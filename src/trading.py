@@ -289,6 +289,25 @@ class TradingManager:
                     f"(order_id={order.get('orderId')})"
                 )
 
+                # Send immediate notification
+                if self.telegram_notifier:
+                    try:
+                        # Get approximate price from order or current price
+                        price = float(order.get("avgPrice", 0))
+                        if price == 0:
+                            price = self.binance_client.get_current_price(symbol)
+
+                        self.telegram_notifier.send_order_notification(
+                            symbol=symbol,
+                            side=side,
+                            quantity=position_size,
+                            price=price,
+                            order_id=str(order.get("orderId")),
+                            reduce_only=False,
+                        )
+                    except Exception as e:
+                        logger.error(f"Error sending order notification: {e}")
+
             except Exception as e:
                 logger.error(f"Error executing {side} order for {symbol}: {e}")
                 results[symbol] = {
@@ -329,6 +348,25 @@ class TradingManager:
                         "order_id": order.get("orderId"),
                     }
                     logger.info(f"Closed position for {symbol}")
+
+                    # Send immediate notification
+                    if self.telegram_notifier:
+                        try:
+                            # Get approximate price
+                            price = float(order.get("avgPrice", 0))
+                            if price == 0:
+                                price = self.binance_client.get_current_price(symbol)
+
+                            self.telegram_notifier.send_order_notification(
+                                symbol=symbol,
+                                side=order.get("side", "CLOSE"),
+                                quantity=float(order.get("origQty", 0)),
+                                price=price,
+                                order_id=str(order.get("orderId")),
+                                reduce_only=True,
+                            )
+                        except Exception as e:
+                            logger.error(f"Error sending close notification: {e}")
                 else:
                     results[symbol] = {
                         "status": "success",
