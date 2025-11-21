@@ -83,23 +83,17 @@ class FormationManager:
         logger.info(f"Fetched {len(btc_prices)} BTC candles")
 
         # Fetch altcoin data
-        altcoin_data: Dict[str, np.ndarray] = {}
+        altcoin_data: Dict[str, pd.DataFrame] = {}
         for alt in self.altcoins:
             try:
                 df = self.binance_client.get_historical_klines(
                     alt, self.interval, start_time, end_time
                 )
-                # Align with BTC data (should have same length)
-                if len(df) == len(btc_df):
-                    altcoin_data[alt] = df["close"].values
+                if not df.empty:
+                    altcoin_data[alt] = df
                     logger.info(f"Fetched {len(df)} {alt} candles")
-                else:
-                    logger.warning(
-                        f"Length mismatch for {alt}: {len(df)} vs {len(btc_df)} (BTC)"
-                    )
             except Exception as e:
                 logger.error(f"Error fetching {alt} data: {e}")
-
 
         if len(altcoin_data) < 2:
             logger.error(
@@ -116,16 +110,42 @@ class FormationManager:
             try:
                 logger.info(f"\nAnalyzing pair: {alt1} - {alt2}")
 
+                # Strict Alignment: Merge BTC, ALT1, and ALT2 on timestamp
+                # We use inner join to keep only timestamps present in ALL three
+                df_btc = btc_df[["timestamp", "close"]].rename(columns={"close": "btc"})
+                df_alt1 = altcoin_data[alt1][["timestamp", "close"]].rename(columns={"close": "alt1"})
+                df_alt2 = altcoin_data[alt2][["timestamp", "close"]].rename(columns={"close": "alt2"})
+
+                # Merge BTC and ALT1
+                merged = pd.merge(df_btc, df_alt1, on="timestamp", how="inner")
+                # Merge with ALT2
+                merged = pd.merge(merged, df_alt2, on="timestamp", how="inner")
+
+                if len(merged) < len(btc_df) * 0.9:  # Warn if we lose >10% of data
+                    logger.warning(
+                        f"  Data alignment dropped significant rows: "
+                        f"{len(btc_df)} -> {len(merged)} candles"
+                    )
+
+                if len(merged) < 100:  # Minimum required data points
+                    logger.warning("  Insufficient overlapping data, skipping pair")
+                    continue
+
+                # Extract aligned price arrays
+                prices_btc = merged["btc"].values
+                prices_alt1 = merged["alt1"].values
+                prices_alt2 = merged["alt2"].values
+
                 # Create spread pair
                 pair = SpreadPair(alt1, alt2)
 
                 # Calculate spread 1: BTC - β1*ALT1
-                spread1, beta1 = calculate_spread(btc_prices, altcoin_data[alt1])
+                spread1, beta1 = calculate_spread(prices_btc, prices_alt1)
                 pair.beta1 = beta1
                 pair.spread1_data = spread1
 
                 # Calculate spread 2: BTC - β2*ALT2
-                spread2, beta2 = calculate_spread(btc_prices, altcoin_data[alt2])
+                spread2, beta2 = calculate_spread(prices_btc, prices_alt2)
                 pair.beta2 = beta2
                 pair.spread2_data = spread2
 

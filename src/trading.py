@@ -102,6 +102,15 @@ class TradingManager:
                     "timestamp": datetime.utcnow().isoformat(),
                 }
 
+        # Sync local state with Binance reality
+        # This prevents "STATE MISMATCH" warnings if the bot was restarted
+        real_position = self._get_current_position_type()
+        if self.current_position != real_position:
+            logger.info(
+                f"Syncing local state with Binance: {self.current_position} -> {real_position}"
+            )
+            self.current_position = real_position
+
         try:
             # Fetch current prices
             btc_price = self.binance_client.get_current_price(self.btc_symbol)
