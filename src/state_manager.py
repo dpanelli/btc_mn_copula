@@ -1,7 +1,7 @@
 """State management for persisting trading configuration and results."""
 
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Optional
 
@@ -35,7 +35,7 @@ class StateManager:
         """
         try:
             state = {
-                "formation_timestamp": datetime.now(datetime.UTC).isoformat(),
+                "formation_timestamp": datetime.now(timezone.utc).isoformat(),
                 "pair": {
                     "alt1": spread_pair.alt1,
                     "alt2": spread_pair.alt2,
@@ -119,7 +119,7 @@ class StateManager:
                 state = json.load(f)
 
             state["current_position"] = position
-            state["position_updated_at"] = datetime.now(datetime.UTC).isoformat()
+            state["position_updated_at"] = datetime.now(timezone.utc).isoformat()
 
             with open(self.state_file, "w") as f:
                 json.dump(state, f, indent=2)

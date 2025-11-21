@@ -1,6 +1,6 @@
 """Formation phase for selecting and fitting trading pairs."""
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from itertools import combinations
 from typing import Dict, List, Optional, Tuple
 
@@ -60,7 +60,7 @@ class FormationManager:
 
         Args:
             end_time: Optional end time for formation (used for backtesting). 
-                      Defaults to datetime.now(datetime.UTC).
+                      Defaults to datetime.now(timezone.utc).
 
         Returns:
             SpreadPair object with fitted parameters, or None if no suitable pairs found
@@ -71,7 +71,7 @@ class FormationManager:
 
         # Step 1: Fetch historical data
         if end_time is None:
-            end_time = datetime.now(datetime.UTC)
+            end_time = datetime.now(timezone.utc)
         start_time = end_time - timedelta(days=self.formation_days)
 
         logger.info(
@@ -225,7 +225,7 @@ class FormationManager:
             Dict with formation summary
         """
         return {
-            "timestamp": datetime.now(datetime.UTC).isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "pair": {
                 "alt1": spread_pair.alt1,
                 "alt2": spread_pair.alt2,

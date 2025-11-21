@@ -1,6 +1,6 @@
 """Binance Futures API client wrapper."""
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional
 
 import pandas as pd
@@ -60,7 +60,7 @@ class BinanceClient:
         """
         try:
             if end_time is None:
-                end_time = datetime.now(datetime.UTC)
+                end_time = datetime.now(timezone.utc)
 
             logger.debug(
                 f"Fetching klines for {symbol} from {start_time} to {end_time}, interval={interval}"
@@ -140,7 +140,7 @@ class BinanceClient:
             # Filter out incomplete candles (last candle might still be forming)
             # A candle is complete when close_time <= current time
             if len(df) > 0:
-                current_time_ms = int(datetime.now(datetime.UTC).timestamp() * 1000)
+                current_time_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
                 df["close_time"] = pd.to_numeric(df["close_time"], errors="coerce")
 
                 # Keep only candles that have closed

@@ -1,6 +1,6 @@
 """Trading execution manager for copula-based strategy."""
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, Optional
 
 from .binance_client import BinanceClient
@@ -80,7 +80,7 @@ class TradingManager:
             return {"status": "waiting", "message": "No copula model - waiting for formation"}
 
         logger.info("-" * 80)
-        logger.info(f"TRADING CYCLE: {datetime.now(datetime.UTC).isoformat()}")
+        logger.info(f"TRADING CYCLE: {datetime.now(timezone.utc).isoformat()}")
         logger.info("-" * 80)
 
         # Log current positions and PnL at start of each cycle
@@ -99,7 +99,7 @@ class TradingManager:
                     "signal": "INCONSISTENT_STATE",
                     "action": "close_inconsistent",
                     "message": "Closed inconsistent positions, waiting for next cycle",
-                    "timestamp": datetime.now(datetime.UTC).isoformat(),
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
                 }
 
         # Sync local state with Binance reality
@@ -171,7 +171,7 @@ class TradingManager:
                     "status": "success",
                     "signal": signal,
                     "action": "none",
-                    "timestamp": datetime.now(datetime.UTC).isoformat(),
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
                 }
 
             # Execute trades based on signal
@@ -200,7 +200,7 @@ class TradingManager:
                             "signal": signal,
                             "action": "none",
                             "message": "Position already open",
-                            "timestamp": datetime.now(datetime.UTC).isoformat(),
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
                         }
                     else:
                         # Different position - close old one first
@@ -238,7 +238,7 @@ class TradingManager:
             return {
                 "status": "error",
                 "message": str(e),
-                "timestamp": datetime.now(datetime.UTC).isoformat(),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
             }
 
     def _execute_entry_signal(self, signal: str) -> Dict:
@@ -390,7 +390,7 @@ class TradingManager:
                 "orders": results,
                 "rollback": rollback_results,
                 "message": "Partial fill detected, all successful orders rolled back",
-                "timestamp": datetime.now(datetime.UTC).isoformat(),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
             }
 
         return {
@@ -398,7 +398,7 @@ class TradingManager:
             "signal": signal,
             "action": "entry",
             "orders": results,
-            "timestamp": datetime.now(datetime.UTC).isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
         }
 
     def _close_positions(self) -> Dict:
@@ -464,7 +464,7 @@ class TradingManager:
             "signal": "CLOSE",
             "action": "close",
             "orders": results,
-            "timestamp": datetime.now(datetime.UTC).isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
         }
 
     def get_current_positions(self) -> Dict:
@@ -505,7 +505,7 @@ class TradingManager:
             return {
                 "balance_usdt": balance,
                 "positions": positions,
-                "timestamp": datetime.now(datetime.UTC).isoformat(),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
             }
         except Exception as e:
             logger.error(f"Error fetching account info: {e}")
