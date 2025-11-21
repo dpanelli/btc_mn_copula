@@ -165,6 +165,17 @@ class TradingManager:
                 if has_positions:
                     current_position_type = self._get_current_position_type()
 
+                    if current_position_type == "INCONSISTENT":
+                        logger.warning("Detected inconsistent positions. Closing all and waiting for next cycle.")
+                        self._close_positions()
+                        return {
+                            "status": "warning",
+                            "signal": signal,
+                            "action": "close_inconsistent",
+                            "message": "Closed inconsistent positions, waiting for next cycle",
+                            "timestamp": datetime.utcnow().isoformat(),
+                        }
+
                     if current_position_type == signal:
                         # Same position already open - ignore duplicate signal
                         logger.info(
@@ -230,6 +241,30 @@ class TradingManager:
         positions = self.copula_model.get_position_quantities(
             signal, self.capital_per_leg
         )
+
+        # Check if we have enough balance for all legs
+        required_capital = sum(cap for _, cap in positions.values())
+        try:
+            available_balance = self.binance_client.get_account_balance()
+            if available_balance < required_capital:
+                logger.error(
+                    f"Insufficient balance for entry: Available={available_balance:.2f}, "
+                    f"Required={required_capital:.2f}"
+                )
+                return {
+                    "status": "error",
+                    "message": "Insufficient balance",
+                    "available": available_balance,
+                    "required": required_capital,
+                }
+        except Exception as e:
+            logger.error(f"Error checking balance: {e}")
+            # Proceed with caution or return error? 
+            # Safer to return error if we can't verify balance
+            return {
+                "status": "error",
+                "message": f"Could not verify balance: {e}",
+            }
 
         results = {}
         for symbol, (side, capital) in positions.items():
@@ -405,7 +440,7 @@ class TradingManager:
                 f"Inconsistent positions: {self.copula_model.spread_pair.alt1}={alt1_amt}, "
                 f"{self.copula_model.spread_pair.alt2}={alt2_amt}"
             )
-            return None
+            return "INCONSISTENT"
 
     def _log_positions_and_pnl(self) -> None:
         """
