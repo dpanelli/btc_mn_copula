@@ -80,7 +80,7 @@ class TradingManager:
             return {"status": "waiting", "message": "No copula model - waiting for formation"}
 
         logger.info("-" * 80)
-        logger.info(f"TRADING CYCLE: {datetime.utcnow().isoformat()}")
+        logger.info(f"TRADING CYCLE: {datetime.now(datetime.UTC).isoformat()}")
         logger.info("-" * 80)
 
         # Log current positions and PnL at start of each cycle
@@ -99,7 +99,7 @@ class TradingManager:
                     "signal": "INCONSISTENT_STATE",
                     "action": "close_inconsistent",
                     "message": "Closed inconsistent positions, waiting for next cycle",
-                    "timestamp": datetime.utcnow().isoformat(),
+                    "timestamp": datetime.now(datetime.UTC).isoformat(),
                 }
 
         # Sync local state with Binance reality
@@ -171,7 +171,7 @@ class TradingManager:
                     "status": "success",
                     "signal": signal,
                     "action": "none",
-                    "timestamp": datetime.utcnow().isoformat(),
+                    "timestamp": datetime.now(datetime.UTC).isoformat(),
                 }
 
             # Execute trades based on signal
@@ -200,7 +200,7 @@ class TradingManager:
                             "signal": signal,
                             "action": "none",
                             "message": "Position already open",
-                            "timestamp": datetime.utcnow().isoformat(),
+                            "timestamp": datetime.now(datetime.UTC).isoformat(),
                         }
                     else:
                         # Different position - close old one first
@@ -238,7 +238,7 @@ class TradingManager:
             return {
                 "status": "error",
                 "message": str(e),
-                "timestamp": datetime.utcnow().isoformat(),
+                "timestamp": datetime.now(datetime.UTC).isoformat(),
             }
 
     def _execute_entry_signal(self, signal: str) -> Dict:
@@ -390,7 +390,7 @@ class TradingManager:
                 "orders": results,
                 "rollback": rollback_results,
                 "message": "Partial fill detected, all successful orders rolled back",
-                "timestamp": datetime.utcnow().isoformat(),
+                "timestamp": datetime.now(datetime.UTC).isoformat(),
             }
 
         return {
@@ -398,7 +398,7 @@ class TradingManager:
             "signal": signal,
             "action": "entry",
             "orders": results,
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(datetime.UTC).isoformat(),
         }
 
     def _close_positions(self) -> Dict:
@@ -464,7 +464,7 @@ class TradingManager:
             "signal": "CLOSE",
             "action": "close",
             "orders": results,
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(datetime.UTC).isoformat(),
         }
 
     def get_current_positions(self) -> Dict:
@@ -505,7 +505,7 @@ class TradingManager:
             return {
                 "balance_usdt": balance,
                 "positions": positions,
-                "timestamp": datetime.utcnow().isoformat(),
+                "timestamp": datetime.now(datetime.UTC).isoformat(),
             }
         except Exception as e:
             logger.error(f"Error fetching account info: {e}")
@@ -551,6 +551,13 @@ class TradingManager:
 
         alt1_amt = alt1_pos.get("position_amt", 0)
         alt2_amt = alt2_pos.get("position_amt", 0)
+        
+        # DEBUG: Log what Binance actually returns
+        logger.debug(
+            f"Position detection: {self.copula_model.spread_pair.alt1}={alt1_amt}, "
+            f"{self.copula_model.spread_pair.alt2}={alt2_amt} "
+            f"(from Binance API)"
+        )
 
         # Map actual positions to spread signal names
         # LONG ALT1 + SHORT ALT2 = SHORT S1, LONG S2 (by spread trading logic)

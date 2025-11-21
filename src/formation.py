@@ -60,7 +60,7 @@ class FormationManager:
 
         Args:
             end_time: Optional end time for formation (used for backtesting). 
-                      Defaults to datetime.utcnow().
+                      Defaults to datetime.now(datetime.UTC).
 
         Returns:
             SpreadPair object with fitted parameters, or None if no suitable pairs found
@@ -71,7 +71,7 @@ class FormationManager:
 
         # Step 1: Fetch historical data
         if end_time is None:
-            end_time = datetime.utcnow()
+            end_time = datetime.now(datetime.UTC)
         start_time = end_time - timedelta(days=self.formation_days)
 
         logger.info(
@@ -225,7 +225,7 @@ class FormationManager:
             Dict with formation summary
         """
         return {
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(datetime.UTC).isoformat(),
             "pair": {
                 "alt1": spread_pair.alt1,
                 "alt2": spread_pair.alt2,

@@ -121,7 +121,7 @@ class BacktestEngine:
             self._close_trade(current_time, reason="FORMATION_RESET")
             
         # Temporarily override current time for the formation manager logic?
-        # FormationManager calculates start_time based on datetime.utcnow().
+        # FormationManager calculates start_time based on datetime.now(datetime.UTC).
         # We need to subclass or patch it to respect 'current_time'.
         # Actually, FormationManager takes start/end in run_formation? No, it calculates internally.
         # We need to patch datetime.utcnow or modify FormationManager.

@@ -46,7 +46,7 @@ def initialize_components():
     logger.info("=" * 100)
     logger.info("BTC MARKET-NEUTRAL COPULA TRADING BOT")
     logger.info("=" * 100)
-    logger.info(f"Started at: {datetime.utcnow().isoformat()} UTC")
+    logger.info(f"Started at: {datetime.now(datetime.UTC).isoformat()} UTC")
     logger.info(f"Testnet mode: {config.binance.use_testnet}")
     logger.info(f"Capital per leg: ${config.trading.capital_per_leg:,.2f}")
     logger.info(f"Max leverage: {config.trading.max_leverage}x")

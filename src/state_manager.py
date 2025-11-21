@@ -35,7 +35,7 @@ class StateManager:
         """
         try:
             state = {
-                "formation_timestamp": datetime.utcnow().isoformat(),
+                "formation_timestamp": datetime.now(datetime.UTC).isoformat(),
                 "pair": {
                     "alt1": spread_pair.alt1,
                     "alt2": spread_pair.alt2,
@@ -119,7 +119,7 @@ class StateManager:
                 state = json.load(f)
 
             state["current_position"] = position
-            state["position_updated_at"] = datetime.utcnow().isoformat()
+            state["position_updated_at"] = datetime.now(datetime.UTC).isoformat()
 
             with open(self.state_file, "w") as f:
                 json.dump(state, f, indent=2)
