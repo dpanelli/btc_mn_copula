@@ -340,15 +340,17 @@ class CopulaModel:
             f"Conditionals: h_1|2={h_1_given_2:.4f}, h_2|1={h_2_given_1:.4f}"
         )
 
-        # Entry signals
+        # Entry signals - CORRECTED PER PAPER
+        # Paper uses: h <= (0.5 - alpha) and h >= (0.5 + alpha)
+        # This creates entry zones at moderate deviations from median (0.5)
         if (
-            h_1_given_2 < self.entry_threshold
-            and h_2_given_1 > 1 - self.entry_threshold
+            h_1_given_2 <= 0.5 - self.entry_threshold
+            and h_2_given_1 >= 0.5 + self.entry_threshold
         ):
             logger.info(
                 f"ENTRY SIGNAL: LONG S1, SHORT S2 "
-                f"(h_1|2={h_1_given_2:.4f} < {self.entry_threshold}, "
-                f"h_2|1={h_2_given_1:.4f} > {1-self.entry_threshold})"
+                f"(h_1|2={h_1_given_2:.4f} ≤ {0.5 - self.entry_threshold}, "
+                f"h_2|1={h_2_given_1:.4f} ≥ {0.5 + self.entry_threshold})"
             )
             return {
                 "signal": "LONG_S1_SHORT_S2",
@@ -361,13 +363,13 @@ class CopulaModel:
             }
 
         elif (
-            h_1_given_2 > 1 - self.entry_threshold
-            and h_2_given_1 < self.entry_threshold
+            h_1_given_2 >= 0.5 + self.entry_threshold
+            and h_2_given_1 <= 0.5 - self.entry_threshold
         ):
             logger.info(
                 f"ENTRY SIGNAL: SHORT S1, LONG S2 "
-                f"(h_1|2={h_1_given_2:.4f} > {1-self.entry_threshold}, "
-                f"h_2|1={h_2_given_1:.4f} < {self.entry_threshold})"
+                f"(h_1|2={h_1_given_2:.4f} ≥ {0.5 + self.entry_threshold}, "
+                f"h_2|1={h_2_given_1:.4f} ≤ {0.5 - self.entry_threshold})"
             )
             return {
                 "signal": "SHORT_S1_LONG_S2",
@@ -379,15 +381,16 @@ class CopulaModel:
                 "distance_2": abs(h_2_given_1 - 0.5),
             }
 
-        # Exit signal (both near 0.5)
+        # Exit signal - CORRECTED PER PAPER  
+        # Paper uses: (0.45 < h < 0.55) OR (0.45 < h < 0.55)
+        # Exit if EITHER spread has converged to fair value
         elif (
-            abs(h_1_given_2 - 0.5) < self.exit_threshold
-            and abs(h_2_given_1 - 0.5) < self.exit_threshold
+            (0.45 < h_1_given_2 < 0.55)
+            or (0.45 < h_2_given_1 < 0.55)
         ):
             logger.info(
                 f"EXIT SIGNAL: CLOSE positions "
-                f"(|h_1|2-0.5|={abs(h_1_given_2-0.5):.4f}, "
-                f"|h_2|1-0.5|={abs(h_2_given_1-0.5):.4f} < {self.exit_threshold})"
+                f"(h_1|2={h_1_given_2:.4f} or h_2|1={h_2_given_1:.4f} near 0.5)"
             )
             return {
                 "signal": "CLOSE",

@@ -46,7 +46,7 @@ class FormationManager:
         self.interval = interval
         self.btc_symbol = "BTCUSDT"
 
-    def run_formation(self) -> Optional[SpreadPair]:
+    def run_formation(self, end_time: Optional[datetime] = None) -> Optional[SpreadPair]:
         """
         Run the formation phase to select and fit the best trading pair.
 
@@ -58,6 +58,10 @@ class FormationManager:
         5. Select top pair
         6. Fit copula parameters
 
+        Args:
+            end_time: Optional end time for formation (used for backtesting). 
+                      Defaults to datetime.utcnow().
+
         Returns:
             SpreadPair object with fitted parameters, or None if no suitable pairs found
         """
@@ -66,7 +70,8 @@ class FormationManager:
         logger.info("=" * 80)
 
         # Step 1: Fetch historical data
-        end_time = datetime.utcnow()
+        if end_time is None:
+            end_time = datetime.utcnow()
         start_time = end_time - timedelta(days=self.formation_days)
 
         logger.info(
