@@ -530,6 +530,14 @@ class TradingManager:
     def _get_current_position_type(self) -> Optional[str]:
         """
         Determine current position type from Binance positions.
+        
+        IMPORTANT: Spread trading logic (per paper):
+        - SHORT S1, LONG S2 → BUY ALT1, SELL ALT2 (creates LONG ALT1, SHORT ALT2)
+        - LONG S1, SHORT S2 → SELL ALT1, BUY ALT2 (creates SHORT ALT1, LONG ALT2)
+        
+        This is because:
+        - S1 = BTC - β1*ALT1. To SHORT S1 (decrease it), we need ALT1 to increase → BUY ALT1
+        - S2 = BTC - β2*ALT2. To LONG S2 (increase it), we need ALT2 to decrease → SELL ALT2
 
         Returns:
             'LONG_S1_SHORT_S2', 'SHORT_S1_LONG_S2', or None
@@ -544,11 +552,13 @@ class TradingManager:
         alt1_amt = alt1_pos.get("position_amt", 0)
         alt2_amt = alt2_pos.get("position_amt", 0)
 
-        # Determine position type based on signs
+        # Map actual positions to spread signal names
+        # LONG ALT1 + SHORT ALT2 = SHORT S1, LONG S2 (by spread trading logic)
         if alt1_amt > 0 and alt2_amt < 0:
-            return "LONG_S1_SHORT_S2"
-        elif alt1_amt < 0 and alt2_amt > 0:
             return "SHORT_S1_LONG_S2"
+        # SHORT ALT1 + LONG ALT2 = LONG S1, SHORT S2 (by spread trading logic)
+        elif alt1_amt < 0 and alt2_amt > 0:
+            return "LONG_S1_SHORT_S2"
         elif alt1_amt == 0 and alt2_amt == 0:
             return None
         else:
