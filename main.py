@@ -104,10 +104,15 @@ def initialize_components():
     if spread_pair:
         logger.info("Loaded existing formation state, setting up trading manager")
         trading_manager.set_spread_pair(spread_pair)
-        # Restore position state
-        current_position = state_manager.get_current_position()
-        trading_manager.current_position = current_position
-        logger.info(f"Current position: {current_position}")
+        
+        # Query Binance for actual positions (don't trust stale file)
+        actual_position = trading_manager._get_current_position_type()
+        trading_manager.current_position = actual_position
+        
+        if actual_position:
+            logger.info(f"Current position (from Binance): {actual_position}")
+        else:
+            logger.info("Current position (from Binance): None (flat)")
     else:
         logger.warning(
             "No existing formation state found. "
