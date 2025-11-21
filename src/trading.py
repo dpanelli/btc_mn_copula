@@ -87,6 +87,21 @@ class TradingManager:
         self._log_positions_and_pnl()
         logger.info("")  # Blank line for readability
 
+        # CRITICAL: Check for inconsistent state immediately
+        # This ensures we clean up bad states even if the signal is HOLD
+        if self._has_open_positions():
+            current_position_type = self._get_current_position_type()
+            if current_position_type == "INCONSISTENT":
+                logger.warning("Detected inconsistent positions. Closing all and waiting for next cycle.")
+                self._close_positions()
+                return {
+                    "status": "warning",
+                    "signal": "INCONSISTENT_STATE",
+                    "action": "close_inconsistent",
+                    "message": "Closed inconsistent positions, waiting for next cycle",
+                    "timestamp": datetime.utcnow().isoformat(),
+                }
+
         try:
             # Fetch current prices
             btc_price = self.binance_client.get_current_price(self.btc_symbol)
@@ -164,17 +179,6 @@ class TradingManager:
 
                 if has_positions:
                     current_position_type = self._get_current_position_type()
-
-                    if current_position_type == "INCONSISTENT":
-                        logger.warning("Detected inconsistent positions. Closing all and waiting for next cycle.")
-                        self._close_positions()
-                        return {
-                            "status": "warning",
-                            "signal": signal,
-                            "action": "close_inconsistent",
-                            "message": "Closed inconsistent positions, waiting for next cycle",
-                            "timestamp": datetime.utcnow().isoformat(),
-                        }
 
                     if current_position_type == signal:
                         # Same position already open - ignore duplicate signal
