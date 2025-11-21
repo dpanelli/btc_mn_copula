@@ -280,6 +280,9 @@ class TradingManager:
             }
 
         results = {}
+        successful_orders = []  # Track successful orders for potential rollback
+
+        # Phase 1: Execute all orders
         for symbol, (side, capital) in positions.items():
             try:
                 # Calculate position size
@@ -296,6 +299,14 @@ class TradingManager:
                     "quantity": position_size,
                     "order_id": order.get("orderId"),
                 }
+                
+                # Track for potential rollback
+                successful_orders.append({
+                    "symbol": symbol,
+                    "side": side,
+                    "quantity": position_size,
+                    "order_id": order.get("orderId"),
+                })
 
                 logger.info(
                     f"Opened position: {side} {position_size} {symbol} "
@@ -328,8 +339,62 @@ class TradingManager:
                     "message": str(e),
                 }
 
+        # Phase 2: Check if all orders succeeded
+        all_successful = all(r.get("status") == "success" for r in results.values())
+        
+        if not all_successful:
+            logger.error(
+                f"PARTIAL FILL DETECTED! Not all orders succeeded. "
+                f"Successful: {len(successful_orders)}/{len(positions)}. "
+                f"ROLLING BACK successful orders to prevent inconsistent position..."
+            )
+            
+            # Rollback: Close all successful positions
+            rollback_results = {}
+            for order_info in successful_orders:
+                try:
+                    symbol = order_info["symbol"]
+                    # Close by placing opposite side order
+                    close_side = "SELL" if order_info["side"] == "BUY" else "BUY"
+                    
+                    logger.warning(
+                        f"Rolling back: {close_side} {order_info['quantity']} {symbol} "
+                        f"(original order_id={order_info['order_id']})"
+                    )
+                    
+                    rollback_order = self.binance_client.place_market_order(
+                        symbol, close_side, order_info["quantity"]
+                    )
+                    
+                    rollback_results[symbol] = {
+                        "status": "success",
+                        "rollback_order_id": rollback_order.get("orderId"),
+                    }
+                    
+                    logger.info(f"Rollback successful for {symbol}")
+                    
+                except Exception as e:
+                    logger.error(
+                        f"CRITICAL: Rollback failed for {symbol}! "
+                        f"Manual intervention required. Error: {e}"
+                    )
+                    rollback_results[symbol] = {
+                        "status": "error",
+                        "message": str(e),
+                    }
+            
+            return {
+                "status": "error",
+                "signal": signal,
+                "action": "entry_failed_with_rollback",
+                "orders": results,
+                "rollback": rollback_results,
+                "message": "Partial fill detected, all successful orders rolled back",
+                "timestamp": datetime.utcnow().isoformat(),
+            }
+
         return {
-            "status": "success" if all(r.get("status") == "success" for r in results.values()) else "partial",
+            "status": "success",
             "signal": signal,
             "action": "entry",
             "orders": results,
