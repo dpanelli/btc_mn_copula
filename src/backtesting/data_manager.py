@@ -9,6 +9,8 @@ from datetime import datetime, timedelta
 from typing import List, Optional
 import os
 
+import time
+
 from src.binance_client import BinanceClient
 from src.logger import get_logger
 
@@ -31,9 +33,35 @@ class DataManager:
         """
         self.db_path = db_path
         self.client = binance_client
-        self._init_db()
+        self._ensure_db()
+    
+    def prefetch_all_data(self, symbols: List[str], start: datetime, end: datetime, interval: str = "5m"):
+        """
+        Pre-fetch all data for given symbols and date range to avoid repeated API calls.
+        
+        Args:
+            symbols: List of symbols to fetch
+            start: Start datetime
+            end: End datetime  
+            interval: Candle interval
+        """
+        logger.info(f"Pre-fetching data for {len(symbols)} symbols from {start} to {end}...")
+        
+        for i, symbol in enumerate(symbols, 1):
+            try:
+                logger.info(f"[{i}/{len(symbols)}] Fetching {symbol}...")
+                df = self.get_data(symbol, start, end, interval)
+                logger.info(f"[{i}/{len(symbols)}] {symbol}: {len(df)} candles cached")
+                
+                # Add a small delay to avoid hitting rate limits (IP ban protection)
+                time.sleep(1.0)
+                
+            except Exception as e:
+                logger.error(f"Error prefetching {symbol}: {e}")
+        
+        logger.info(f"Pre-fetch complete! All data cached in {self.db_path}")
 
-    def _init_db(self):
+    def _ensure_db(self):
         """Initialize SQLite database schema."""
         os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
         
@@ -99,8 +127,11 @@ class DataManager:
         db_min_ts = df_db["timestamp"].min().timestamp() * 1000
         db_max_ts = df_db["timestamp"].max().timestamp() * 1000
         
+        # Only fetch if gap is significant (> 1 hour) to avoid spamming API for single candles
+        GAP_THRESHOLD_MS = 60 * 60 * 1000 
+        
         # Fetch missing head (before DB data)
-        if start_ts < db_min_ts:
+        if start_ts < db_min_ts and (db_min_ts - start_ts) > GAP_THRESHOLD_MS:
             missing_start = start_time
             missing_end = datetime.fromtimestamp(db_min_ts / 1000)
             logger.info(f"Fetching missing head for {symbol}: {missing_start} to {missing_end}")
@@ -109,7 +140,7 @@ class DataManager:
                 self._save_to_db(symbol, df_head)
                 
         # Fetch missing tail (after DB data)
-        if end_ts > db_max_ts:
+        if end_ts > db_max_ts and (end_ts - db_max_ts) > GAP_THRESHOLD_MS:
             missing_start = datetime.fromtimestamp(db_max_ts / 1000)
             missing_end = end_time
             logger.info(f"Fetching missing tail for {symbol}: {missing_start} to {missing_end}")
@@ -145,9 +176,12 @@ class DataManager:
         data = df.copy()
         data["symbol"] = symbol
         # Ensure timestamp is integer milliseconds
-        data["timestamp"] = data["timestamp"].astype(int) // 10**6 
+        # Convert to int64 first, then to native python int to avoid numpy types in SQLite
+        data["timestamp"] = (data["timestamp"].astype("int64") // 10**6).astype(int)
         
-        records = data[["symbol", "timestamp", "open", "high", "low", "close", "volume"]].to_records(index=False)
+        # Convert to list of tuples for sqlite3
+        # to_records() can cause issues with numpy types being stored as BLOBs
+        records = data[["symbol", "timestamp", "open", "high", "low", "close", "volume"]].values.tolist()
         
         with sqlite3.connect(self.db_path) as conn:
             conn.executemany("""
