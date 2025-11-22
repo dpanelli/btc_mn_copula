@@ -22,6 +22,9 @@ class TradingManager:
         entry_threshold: float = 0.10,
         exit_threshold: float = 0.10,
         telegram_notifier: Optional[TelegramNotifier] = None,
+        state_manager: Optional[object] = None,
+        stop_loss_pct: float = 0.04,
+        max_trade_duration_hours: int = 48,
     ):
         """
         Initialize trading manager.
@@ -33,6 +36,9 @@ class TradingManager:
             entry_threshold: Entry threshold α1 (default 0.10)
             exit_threshold: Exit threshold α2 (default 0.10)
             telegram_notifier: Optional TelegramNotifier instance for notifications
+            state_manager: Optional StateManager for crash-resistant state storage
+            stop_loss_pct: Stop-loss as % of position value (default 0.04 = 4%)
+            max_trade_duration_hours: Maximum trade duration in hours (default 48)
         """
         self.binance_client = binance_client
         self.capital_per_leg = capital_per_leg
@@ -40,6 +46,9 @@ class TradingManager:
         self.entry_threshold = entry_threshold
         self.exit_threshold = exit_threshold
         self.telegram_notifier = telegram_notifier
+        self.state_manager = state_manager
+        self.stop_loss_pct = stop_loss_pct
+        self.max_trade_duration_hours = max_trade_duration_hours
         self.copula_model: Optional[CopulaModel] = None
         self.current_position: Optional[str] = None  # Track current position state
         self.btc_symbol = "BTCUSDT"
@@ -110,6 +119,71 @@ class TradingManager:
                 f"Syncing local state with Binance: {self.current_position} -> {real_position}"
             )
             self.current_position = real_position
+
+        # RISK MANAGEMENT: Check stop-loss and time-based exit for open positions
+        if self._has_open_positions():
+            # 1. Stop-loss check (percentage-based)
+            unrealized_pnl = self._get_position_pnl()  # From Binance API
+            
+            # Get entry capital from state, or use default
+            entry_capital = self.capital_per_leg * 2  # Default
+            if self.state_manager:
+                try:
+                    state = self.state_manager.load_state()
+                    entry_capital = state.get('trade_entry_capital', entry_capital)
+                except Exception as e:
+                    logger.warning(f"Could not load entry capital from state: {e}")
+            
+            stop_loss_threshold = -entry_capital * self.stop_loss_pct
+            
+            if unrealized_pnl < stop_loss_threshold:
+                logger.warning(
+                    f"🛑 STOP-LOSS triggered: PnL=${unrealized_pnl:.2f} < "
+                    f"${stop_loss_threshold:.2f} ({self.stop_loss_pct:.1%} of ${entry_capital:.2f})"
+                )
+                self._close_positions()
+                self._clear_trade_entry()
+                
+                if self.telegram_notifier:
+                    self.telegram_notifier.send_message(
+                        f"🛑 STOP-LOSS: Closed positions at ${unrealized_pnl:.2f}"
+                    )
+                
+                return {
+                    "status": "stop_loss",
+                    "pnl": unrealized_pnl,
+                    "threshold": stop_loss_threshold,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                }
+            
+            # 2. Time-based exit check
+            entry_time = self._get_trade_entry_time()
+            if entry_time:
+                duration_hours = (datetime.now(timezone.utc) - entry_time).total_seconds() / 3600
+                
+                if duration_hours > self.max_trade_duration_hours:
+                    logger.warning(
+                        f"⏰ TIME-BASED EXIT: Trade duration {duration_hours:.1f}h > "
+                        f"{self.max_trade_duration_hours}h"
+                    )
+                    self._close_positions()
+                    self._clear_trade_entry()
+                    
+                    if self.telegram_notifier:
+                        self.telegram_notifier.send_message(
+                            f"⏰ TIME EXIT: Closed positions after {duration_hours:.1f}h, PnL=${unrealized_pnl:.2f}"
+                        )
+                    
+                    return {
+                        "status": "time_exit",
+                        "duration_hours": duration_hours,
+                        "pnl": unrealized_pnl,
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                    }
+            else:
+                # No entry time found - log warning but continue
+                if self._has_open_positions():
+                    logger.warning("No entry time found in state, skipping time-based exit check")
 
         try:
             # Fetch current prices
@@ -393,6 +467,11 @@ class TradingManager:
                 "timestamp": datetime.now(timezone.utc).isoformat(),
             }
 
+
+        # RISK MANAGEMENT: Save trade entry time and capital to state
+        total_capital = self.capital_per_leg * 2
+        self._save_trade_entry(total_capital)
+
         return {
             "status": "success",
             "signal": signal,
@@ -458,6 +537,10 @@ class TradingManager:
                     "status": "error",
                     "message": str(e),
                 }
+
+
+        # RISK MANAGEMENT: Clear trade entry from state
+        self._clear_trade_entry()
 
         return {
             "status": "success" if all(r.get("status") == "success" for r in results.values()) else "partial",
@@ -643,3 +726,100 @@ class TradingManager:
 
         except Exception as e:
             logger.error(f"Error logging positions and PnL: {e}", exc_info=True)
+
+    # ========================================================================
+    # RISK MANAGEMENT METHODS
+    # ========================================================================
+
+    def _get_position_pnl(self) -> float:
+        """
+        Get total unrealized PnL from Binance API.
+        
+        Returns:
+            Total unrealized PnL across both legs in USDT
+        """
+        try:
+            positions = self.binance_client.futures_position_information()
+            
+            alt1 = self.copula_model.spread_pair.alt1
+            alt2 = self.copula_model.spread_pair.alt2
+            
+            pnl_alt1 = 0.0
+            pnl_alt2 = 0.0
+            
+            for pos in positions:
+                symbol = pos.get('symbol')
+                if symbol == alt1:
+                    pnl_alt1 = float(pos.get('unRealizedProfit', 0))
+                elif symbol == alt2:
+                    pnl_alt2 = float(pos.get('unRealizedProfit', 0))
+            
+            total_pnl = pnl_alt1 + pnl_alt2
+            logger.debug(f"Position PnL: {alt1}=${pnl_alt1:.2f}, {alt2}=${pnl_alt2:.2f}, Total=${total_pnl:.2f}")
+            
+            return total_pnl
+            
+        except Exception as e:
+            logger.error(f"Error getting position PnL: {e}", exc_info=True)
+            return 0.0
+
+    def _get_trade_entry_time(self) -> Optional[datetime]:
+        """
+        Get trade entry time from state file.
+        
+        Returns:
+            Entry time as datetime, or None if not found
+        """
+        if not self.state_manager:
+            return None
+        
+        try:
+            state = self.state_manager.load_state()
+            entry_time_str = state.get('trade_entry_time')
+            
+            if entry_time_str:
+                # Parse ISO format timestamp
+                return datetime.fromisoformat(entry_time_str.replace('Z', '+00:00'))
+            
+        except Exception as e:
+            logger.error(f"Error getting trade entry time: {e}", exc_info=True)
+        
+        return None
+
+    def _save_trade_entry(self, capital: float):
+        """
+        Save trade entry time and capital to state file.
+        
+        Args:
+            capital: Total position capital (both legs)
+        """
+        if not self.state_manager:
+            logger.warning("No state_manager available, cannot save trade entry")
+            return
+        
+        try:
+            state = self.state_manager.load_state()
+            state['trade_entry_time'] = datetime.now(timezone.utc).isoformat()
+            state['trade_entry_capital'] = capital
+            self.state_manager.save_state(state)
+            
+            logger.info(f"Saved trade entry: time={state['trade_entry_time']}, capital=${capital:.2f}")
+            
+        except Exception as e:
+            logger.error(f"Error saving trade entry: {e}", exc_info=True)
+
+    def _clear_trade_entry(self):
+        """Clear trade entry data from state file."""
+        if not self.state_manager:
+            return
+        
+        try:
+            state = self.state_manager.load_state()
+            state.pop('trade_entry_time', None)
+            state.pop('trade_entry_capital', None)
+            self.state_manager.save_state(state)
+            
+            logger.info("Cleared trade entry from state")
+            
+        except Exception as e:
+            logger.error(f"Error clearing trade entry: {e}", exc_info=True)

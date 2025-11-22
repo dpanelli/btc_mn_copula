@@ -75,7 +75,9 @@ class BacktestEngine:
         self.formation_manager = FormationManager(
             binance_client=self.mock_client,
             altcoins=config.trading.altcoins,
-            formation_days=config.trading.formation_days
+            formation_days=config.trading.formation_days,
+            volatility_jump_threshold=config.risk_management.volatility_jump_threshold,
+            volatility_match_factor=config.risk_management.volatility_match_factor,
         )
 
     def run(self):
@@ -170,6 +172,32 @@ class BacktestEngine:
         if not prices:
             return
 
+        # RISK MANAGEMENT: Check stop-loss and time-based exit for open trades
+        if self.current_trade:
+            # 1. Stop-loss check (percentage-based)
+            unrealized_pnl = self._calculate_unrealized_pnl(current_time, prices)
+            position_value = self.config.trading.capital_per_leg * 2  # Both legs
+            stop_loss_threshold = -position_value * self.config.risk_management.stop_loss_pct
+            
+            if unrealized_pnl < stop_loss_threshold:
+                logger.warning(
+                    f"[{current_time}] STOP-LOSS triggered: PnL=${unrealized_pnl:.2f} "
+                    f"< ${stop_loss_threshold:.2f} "
+                    f"({self.config.risk_management.stop_loss_pct:.1%} of ${position_value:.2f})"
+                )
+                self._close_trade(current_time, "STOP_LOSS")
+                return
+            
+            # 2. Time-based exit check
+            trade_duration_hours = (current_time - self.current_trade.entry_time).total_seconds() / 3600
+            if trade_duration_hours > self.config.risk_management.max_trade_duration_hours:
+                logger.warning(
+                    f"[{current_time}] TIME-BASED EXIT: Trade duration {trade_duration_hours:.1f}h "
+                    f"> {self.config.risk_management.max_trade_duration_hours}h"
+                )
+                self._close_trade(current_time, "TIME_EXIT")
+                return
+
         # Generate signal
         signal_data = self.copula_model.generate_signal(
             prices['BTCUSDT'],
@@ -249,8 +277,11 @@ class BacktestEngine:
         
         return prices
     
+    
     def _open_trade(self, timestamp: datetime, signal: str, prices: Dict[str, float]):
         """Open a new trade."""
+        pair_name = f"{self.current_pair.alt1}-{self.current_pair.alt2}"
+        
         # Calculate position sizes
         alt1_size = self.config.trading.capital_per_leg / prices[self.current_pair.alt1]
         alt2_size = self.config.trading.capital_per_leg / prices[self.current_pair.alt2]
@@ -258,7 +289,7 @@ class BacktestEngine:
         self.current_trade = Trade(
             entry_time=timestamp,
             exit_time=None,
-            pair=f"{self.current_pair.alt1}-{self.current_pair.alt2}",
+            pair=pair_name,
             side=signal,
             size_alt1=alt1_size,
             size_alt2=alt2_size,
@@ -311,3 +342,24 @@ class BacktestEngine:
             pnl_alt2 = -trade.size_alt2 * (trade.exit_price_alt2 - trade.entry_price_alt2)
         
         return pnl_alt1 + pnl_alt2
+
+    def _calculate_unrealized_pnl(self, current_time: datetime, prices: Dict[str, float]) -> float:
+        """Calculate unrealized PnL for the current open trade."""
+        if not self.current_trade:
+            return 0.0
+        
+        # Create a temporary trade object with current prices as exit prices
+        temp_trade = Trade(
+            entry_time=self.current_trade.entry_time,
+            exit_time=current_time,
+            pair=self.current_trade.pair,
+            side=self.current_trade.side,
+            size_alt1=self.current_trade.size_alt1,
+            size_alt2=self.current_trade.size_alt2,
+            entry_price_alt1=self.current_trade.entry_price_alt1,
+            entry_price_alt2=self.current_trade.entry_price_alt2,
+            exit_price_alt1=prices[self.current_pair.alt1],
+            exit_price_alt2=prices[self.current_pair.alt2],
+        )
+        
+        return self._calculate_pnl(temp_trade)

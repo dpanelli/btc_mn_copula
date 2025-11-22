@@ -84,6 +84,9 @@ def initialize_components():
     else:
         logger.info("Telegram notifications disabled")
 
+    # Initialize state manager
+    state_manager = StateManager(state_file=config.state_file)
+
     # Initialize trading manager
     trading_manager = TradingManager(
         binance_client=binance_client,
@@ -92,10 +95,10 @@ def initialize_components():
         entry_threshold=config.trading.entry_threshold,
         exit_threshold=config.trading.exit_threshold,
         telegram_notifier=telegram_notifier,
+        state_manager=state_manager,
+        stop_loss_pct=config.risk_management.stop_loss_pct,
+        max_trade_duration_hours=config.risk_management.max_trade_duration_hours,
     )
-
-    # Initialize state manager
-    state_manager = StateManager(state_file=config.state_file)
 
     logger.info("All components initialized successfully")
 

@@ -35,6 +35,16 @@ class TradingConfig:
 
 
 @dataclass
+class RiskManagementConfig:
+    """Risk management configuration."""
+
+    stop_loss_pct: float  # Stop-loss as % of position value (e.g., 0.04 = 4%)
+    max_trade_duration_hours: int  # Maximum trade duration in hours
+    volatility_jump_threshold: float  # Max allowed single-day price jump (e.g., 0.30 = 30%)
+    volatility_match_factor: float  # Max volatility ratio between pair legs (e.g., 1.3)
+
+
+@dataclass
 class SchedulerConfig:
     """Scheduler configuration."""
 
@@ -68,6 +78,7 @@ class Config:
 
     binance: BinanceConfig
     trading: TradingConfig
+    risk_management: RiskManagementConfig
     scheduler: SchedulerConfig
     logging: LoggingConfig
     telegram: TelegramConfig
@@ -139,12 +150,21 @@ def load_config() -> Config:
         enabled=telegram_enabled,
     )
 
+    # Risk management configuration
+    risk_management_config = RiskManagementConfig(
+        stop_loss_pct=float(os.getenv("STOP_LOSS_PCT", "0.04")),
+        max_trade_duration_hours=int(os.getenv("MAX_TRADE_DURATION_HOURS", "48")),
+        volatility_jump_threshold=float(os.getenv("VOLATILITY_JUMP_THRESHOLD", "0.30")),
+        volatility_match_factor=float(os.getenv("VOLATILITY_MATCH_FACTOR", "1.3")),
+    )
+
     # State file
     state_file = os.getenv("STATE_FILE", "state/state.json")
 
     return Config(
         binance=binance_config,
         trading=trading_config,
+        risk_management=risk_management_config,
         scheduler=scheduler_config,
         logging=logging_config,
         telegram=telegram_config,

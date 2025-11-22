@@ -30,6 +30,8 @@ class FormationManager:
         altcoins: List[str],
         formation_days: int = 21,
         interval: str = "5m",
+        volatility_jump_threshold: float = 0.30,
+        volatility_match_factor: float = 1.3,
     ):
         """
         Initialize formation manager.
@@ -39,12 +41,17 @@ class FormationManager:
             altcoins: List of altcoin symbols (e.g., ['ETHUSDT', 'BNBUSDT'])
             formation_days: Number of days for formation period (default 21)
             interval: Kline interval (default '5m')
+            volatility_jump_threshold: Max allowed single-day price jump (default 0.30 = 30%)
+            volatility_match_factor: Max volatility ratio between pair legs (default 1.3)
         """
         self.binance_client = binance_client
         self.altcoins = altcoins
         self.formation_days = formation_days
         self.interval = interval
+        self.volatility_jump_threshold = volatility_jump_threshold
+        self.volatility_match_factor = volatility_match_factor
         self.btc_symbol = "BTCUSDT"
+        self.blacklisted_coins = set()
 
     def run_formation(self, end_time: Optional[datetime] = None) -> Optional[SpreadPair]:
         """
@@ -106,20 +113,55 @@ class FormationManager:
             )
             return None
 
+        # RISK MANAGEMENT: Filter out unstable coins and calculate volatilities
+        self.blacklisted_coins = set()  # Reset blacklist each formation
+        stable_altcoins = {}
+        coin_volatilities = {}
+        
+        for symbol, df in altcoin_data.items():
+            # Check coin stability (abnormal price jumps)
+            if not self._check_coin_stability(symbol, df):
+                continue  # Skip blacklisted coins
+            
+            # Calculate volatility
+            volatility = self._calculate_volatility(df)
+            stable_altcoins[symbol] = df
+            coin_volatilities[symbol] = volatility
+        
+        logger.info(
+            f"Coin stability check: {len(stable_altcoins)}/{len(altcoin_data)} passed. "
+            f"Blacklisted: {self.blacklisted_coins if self.blacklisted_coins else 'None'}"
+        )
+        
+        if len(stable_altcoins) < 2:
+            logger.error(f"Insufficient stable coins: only {len(stable_altcoins)} available")
+            return None
+
         # Step 2-4: Calculate spreads, test cointegration, rank by tau
         cointegrated_pairs: List[Tuple[SpreadPair, float]] = []
 
-        # Generate all pair combinations
-        alt_symbols = list(altcoin_data.keys())
+        # Generate all pair combinations from stable coins only
+        alt_symbols = list(stable_altcoins.keys())
         for alt1, alt2 in combinations(alt_symbols, 2):
             try:
+                # RISK MANAGEMENT: Check volatility match
+                vol1 = coin_volatilities[alt1]
+                vol2 = coin_volatilities[alt2]
+                
+                if not self._check_volatility_match(vol1, vol2):
+                    logger.debug(
+                        f"Skipping {alt1}-{alt2}: Volatility mismatch "
+                        f"({vol1:.1%} vs {vol2:.1%}, ratio={max(vol1,vol2)/min(vol1,vol2):.2f})"
+                    )
+                    continue
+                
                 logger.info(f"\nAnalyzing pair: {alt1} - {alt2}")
 
                 # Strict Alignment: Merge BTC, ALT1, and ALT2 on timestamp
                 # We use inner join to keep only timestamps present in ALL three
                 df_btc = btc_df[["timestamp", "close"]].rename(columns={"close": "btc"})
-                df_alt1 = altcoin_data[alt1][["timestamp", "close"]].rename(columns={"close": "alt1"})
-                df_alt2 = altcoin_data[alt2][["timestamp", "close"]].rename(columns={"close": "alt2"})
+                df_alt1 = stable_altcoins[alt1][["timestamp", "close"]].rename(columns={"close": "alt1"})
+                df_alt2 = stable_altcoins[alt2][["timestamp", "close"]].rename(columns={"close": "alt2"})
 
                 # Merge BTC and ALT1
                 merged = pd.merge(df_btc, df_alt1, on="timestamp", how="inner")
@@ -241,3 +283,72 @@ class FormationManager:
                 "spread2": spread_pair.spread2_data.tolist(),
             },
         }
+
+    def _check_coin_stability(self, symbol: str, df: pd.DataFrame) -> bool:
+        """
+        Check if coin has abnormal price jumps.
+        
+        Args:
+            symbol: Coin symbol
+            df: DataFrame with 'close' prices
+            
+        Returns:
+            True if stable, False if should be blacklisted
+        """
+        # Resample to daily for jump detection
+        df_daily = df.set_index('timestamp').resample('1D')['close'].last().dropna()
+        
+        if len(df_daily) < 2:
+            return True  # Not enough data to check
+        
+        # Calculate daily returns
+        returns = df_daily.pct_change().dropna()
+        
+        # Check for any single-day jump > threshold
+        max_jump = returns.abs().max()
+        
+        if max_jump > self.volatility_jump_threshold:
+            logger.warning(
+                f"{symbol}: Abnormal price jump detected: {max_jump:.1%} > "
+                f"{self.volatility_jump_threshold:.1%}. Blacklisting for this cycle."
+            )
+            self.blacklisted_coins.add(symbol)
+            return False
+        
+        return True
+
+    def _calculate_volatility(self, df: pd.DataFrame) -> float:
+        """
+        Calculate annualized volatility from price data.
+        
+        Args:
+            df: DataFrame with 'close' prices
+            
+        Returns:
+            Annualized volatility
+        """
+        # Resample to daily for volatility calculation
+        df_daily = df.set_index('timestamp').resample('1D')['close'].last().dropna()
+        
+        if len(df_daily) < 2:
+            return 0.0
+        
+        returns = df_daily.pct_change().dropna()
+        return returns.std() * np.sqrt(252)  # Annualized
+
+    def _check_volatility_match(self, vol1: float, vol2: float) -> bool:
+        """
+        Check if two volatilities are within acceptable ratio.
+        
+        Args:
+            vol1: Volatility of first coin
+            vol2: Volatility of second coin
+            
+        Returns:
+            True if matched, False otherwise
+        """
+        if vol1 == 0 or vol2 == 0:
+            return False
+        
+        ratio = max(vol1, vol2) / min(vol1, vol2)
+        return ratio <= self.volatility_match_factor
