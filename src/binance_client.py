@@ -406,3 +406,37 @@ class BinanceClient:
         except Exception as e:
             logger.error(f"Error fetching position information: {e}")
             raise
+
+    def round_quantity_to_precision(self, symbol: str, quantity: float) -> float:
+        """
+        Round quantity to symbol's LOT_SIZE precision.
+        
+        Args:
+            symbol: Trading pair symbol
+            quantity: Raw quantity to round
+            
+        Returns:
+            Quantity rounded to exchange precision
+        """
+        try:
+            exchange_info = self.client.futures_exchange_info()
+            for s in exchange_info["symbols"]:
+                if s["symbol"] == symbol:
+                    for f in s["filters"]:
+                        if f["filterType"] == "LOT_SIZE":
+                            step_size = float(f["stepSize"])
+                            # Round to step size
+                            rounded = round(quantity / step_size) * step_size
+                            logger.debug(
+                                f"Rounded {symbol} quantity: {quantity:.8f} -> {rounded:.8f} "
+                                f"(step_size={step_size})"
+                            )
+                            return rounded
+            
+            # If no LOT_SIZE filter found, return original
+            logger.warning(f"No LOT_SIZE filter found for {symbol}, using raw quantity")
+            return quantity
+            
+        except Exception as e:
+            logger.error(f"Error rounding quantity for {symbol}: {e}")
+            return quantity
