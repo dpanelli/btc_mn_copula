@@ -2,12 +2,12 @@
 
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional
-import os
+
 import pandas as pd
 from binance.client import Client
-from binance.exceptions import BinanceAPIException
-import time
-from src.logger import get_logger
+from binance.enums import *
+
+from .logger import get_logger
 
 logger = get_logger(__name__)
 
@@ -15,13 +15,13 @@ logger = get_logger(__name__)
 class BinanceClient:
     """Wrapper for Binance Futures API operations."""
 
-    def __init__(self, api_key: str = None, api_secret: str = None, testnet: bool = False):
+    def __init__(self, api_key: str, api_secret: str, testnet: bool = True):
         """
         Initialize Binance client.
 
         Args:
-            api_key: Binance API key (optional for public data)
-            api_secret: Binance API secret (optional for public data)
+            api_key: Binance API key
+            api_secret: Binance API secret
             testnet: Use testnet if True, live trading if False
         """
         self.testnet = testnet
@@ -34,7 +34,7 @@ class BinanceClient:
             logger.info("Initialized Binance Futures TESTNET client")
         else:
             self.client = Client(api_key=api_key, api_secret=api_secret)
-            logger.info("Initialized Binance Futures LIVE client (Public Data Mode)")
+            logger.warning("Initialized Binance Futures LIVE client - real money at risk!")
 
     def get_historical_klines(
         self,
@@ -44,7 +44,10 @@ class BinanceClient:
         end_time: Optional[datetime] = None,
     ) -> pd.DataFrame:
         """
-        Fetch historical kline/candlestick data with automatic pagination, throttling, and retry logic.
+        Fetch historical kline/candlestick data with automatic pagination.
+
+        Binance API has a limit of 1500 klines per request. This method automatically
+        handles pagination to fetch longer time periods (e.g., 21 days of 5-min data).
 
         Args:
             symbol: Trading pair symbol (e.g., 'BTCUSDT')
@@ -75,54 +78,55 @@ class BinanceClient:
                 batch_count += 1
                 start_ms = int(current_start.timestamp() * 1000)
 
-                try:
-                    # Fetch batch of up to 1500 klines
-                    klines = self.client.futures_klines(
-                        symbol=symbol,
-                        interval=interval,
-                        startTime=start_ms,
-                        endTime=end_ms,
-                        limit=1500,  # Max per request
-                    )
+                # Retry logic for API failures
+                max_retries = 3
+                for attempt in range(max_retries):
+                    try:
+                        # Fetch batch of up to 1500 klines
+                        klines = self.client.futures_klines(
+                            symbol=symbol,
+                            interval=interval,
+                            startTime=start_ms,
+                            endTime=end_ms,
+                            limit=1500,  # Max per request
+                        )
+                        break  # Success, exit retry loop
+                    except Exception as e:
+                        if attempt < max_retries - 1:
+                            wait_time = 2 ** attempt  # Exponential backoff
+                            logger.warning(f"API error for {symbol}, retrying in {wait_time}s: {e}")
+                            import time
+                            time.sleep(wait_time)
+                        else:
+                            logger.error(f"Failed to fetch klines for {symbol} after {max_retries} attempts")
+                            raise
 
-                    if not klines:
-                        # No more data available
-                        break
+                if not klines:
+                    # No more data available
+                    break
 
-                    all_klines.extend(klines)
-                    logger.debug(
-                        f"Batch {batch_count}: Fetched {len(klines)} klines for {symbol}"
-                    )
+                all_klines.extend(klines)
+                logger.debug(
+                    f"Batch {batch_count}: Fetched {len(klines)} klines for {symbol}"
+                )
 
-                    # Check if we got less than 1500 klines (reached the end)
-                    if len(klines) < 1500:
-                        break
+                # Check if we got less than 1500 klines (reached the end)
+                if len(klines) < 1500:
+                    break
 
-                    # Update start time for next batch: use last candle's close_time + 1ms
-                    last_close_time_ms = int(klines[-1][6])
-                    current_start = datetime.fromtimestamp(
-                        last_close_time_ms / 1000, tz=timezone.utc
-                    ) + timedelta(milliseconds=1)
+                # Update start time for next batch: use last candle's close_time + 1ms
+                last_close_time_ms = int(klines[-1][6])
+                current_start = datetime.fromtimestamp(last_close_time_ms / 1000) + timedelta(
+                    milliseconds=1
+                )
 
-                    # Safety check: prevent infinite loop
-                    if current_start >= end_time:
-                        break
+                # Safety check: prevent infinite loop
+                if current_start >= end_time:
+                    break
                     
-                    # THROTTLING: Sleep 1.0s between requests
-                    time.sleep(1.0)
-
-                except BinanceAPIException as e:
-                    if e.code == -1003: # Too many requests
-                        logger.warning(f"Rate limit hit for {symbol}. Sleeping 60s...")
-                        time.sleep(60)
-                        continue
-                    else:
-                        raise e
-                except Exception as e:
-                    logger.error(f"Error fetching batch for {symbol}: {e}")
-                    # Retry once?
-                    time.sleep(5)
-                    continue
+                # Throttle to avoid rate limits (1 request per second)
+                import time
+                time.sleep(1.0)
 
             if not all_klines:
                 logger.warning(f"No klines returned for {symbol}")
@@ -173,29 +177,6 @@ class BinanceClient:
             df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms").dt.tz_localize('UTC')
             for col in ["open", "high", "low", "close", "volume"]:
                 df[col] = pd.to_numeric(df[col], errors="coerce")
-            
-            # STRICT VALIDATION: Check for NaN or invalid values
-            if df[["open", "high", "low", "close", "volume"]].isna().any().any():
-                nan_count = df[["open", "high", "low", "close", "volume"]].isna().sum().sum()
-                logger.error(f"Found {nan_count} NaN values in {symbol} data - REJECTING")
-                raise ValueError(f"Invalid data for {symbol}: contains NaN values")
-            
-            # STRICT VALIDATION: Check for zero or negative prices
-            price_cols = ["open", "high", "low", "close"]
-            if (df[price_cols] <= 0).any().any():
-                logger.error(f"Found zero or negative prices in {symbol} data - REJECTING")
-                raise ValueError(f"Invalid data for {symbol}: contains zero/negative prices")
-            
-            # STRICT VALIDATION: Check for gaps in timestamps (should be 5 minutes apart)
-            if len(df) > 1:
-                time_diffs = df['timestamp'].diff().dt.total_seconds() / 60
-                expected_diff = 5  # 5-minute candles
-                gaps = time_diffs[(time_diffs > expected_diff * 1.5) & (time_diffs.notna())]
-                if len(gaps) > 0:
-                    logger.warning(
-                        f"Found {len(gaps)} gaps in {symbol} data (expected 5min intervals). "
-                        f"Max gap: {gaps.max():.0f} minutes"
-                    )
 
             logger.info(f"Returning {len(df)} complete klines for {symbol}")
             return df
@@ -216,22 +197,11 @@ class BinanceClient:
         """
         try:
             ticker = self.client.futures_symbol_ticker(symbol=symbol)
-            return float(ticker["price"])
+            price = float(ticker["price"])
+            logger.debug(f"Current price for {symbol}: {price}")
+            return price
         except Exception as e:
             logger.error(f"Error fetching price for {symbol}: {e}")
-            raise
-
-    def futures_exchange_info(self) -> Dict:
-        """
-        Get exchange information.
-
-        Returns:
-            Dictionary with exchange info
-        """
-        try:
-            return self.client.futures_exchange_info()
-        except BinanceAPIException as e:
-            logger.error(f"Error fetching exchange info: {e}")
             raise
 
     def set_leverage(self, symbol: str, leverage: int) -> None:
@@ -245,7 +215,7 @@ class BinanceClient:
         try:
             result = self.client.futures_change_leverage(symbol=symbol, leverage=leverage)
             logger.info(f"Set leverage for {symbol} to {leverage}x: {result}")
-        except BinanceAPIException as e:
+        except Exception as e:
             logger.error(f"Error setting leverage for {symbol}: {e}")
             raise
 
@@ -265,8 +235,6 @@ class BinanceClient:
             Order response dict
         """
         try:
-            from binance.enums import ORDER_TYPE_MARKET
-            
             logger.info(
                 f"Placing market {side} order for {symbol}: {quantity} "
                 f"(reduceOnly={reduce_only})"
@@ -288,7 +256,7 @@ class BinanceClient:
             logger.info(f"Order placed successfully: {order}")
             return order
 
-        except BinanceAPIException as e:
+        except Exception as e:
             logger.error(f"Error placing market order for {symbol}: {e}")
             raise
 
@@ -318,7 +286,7 @@ class BinanceClient:
             logger.debug(f"No position for {symbol}")
             return None
 
-        except BinanceAPIException as e:
+        except Exception as e:
             logger.error(f"Error fetching position for {symbol}: {e}")
             raise
 
@@ -336,8 +304,6 @@ class BinanceClient:
             Order response dict, or None if no position to close
         """
         try:
-            from binance.enums import SIDE_SELL, SIDE_BUY
-            
             position = self.get_position(symbol)
             if position is None:
                 logger.info(f"No position to close for {symbol}")
@@ -355,7 +321,7 @@ class BinanceClient:
             logger.info(f"Closing position for {symbol}: {side} {quantity} (reduceOnly=True)")
             return self.place_market_order(symbol, side, quantity, reduce_only=True)
 
-        except BinanceAPIException as e:
+        except Exception as e:
             logger.error(f"Error closing position for {symbol}: {e}")
             raise
 
@@ -374,7 +340,7 @@ class BinanceClient:
                     logger.debug(f"USDT balance: {balance}")
                     return balance
             return 0.0
-        except BinanceAPIException as e:
+        except Exception as e:
             logger.error(f"Error fetching account balance: {e}")
             raise
 
@@ -418,6 +384,6 @@ class BinanceClient:
             )
             return position_size
 
-        except BinanceAPIException as e:
+        except Exception as e:
             logger.error(f"Error calculating position size for {symbol}: {e}")
             raise
