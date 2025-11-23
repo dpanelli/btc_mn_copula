@@ -2,7 +2,7 @@ import multiprocessing
 from concurrent.futures import ProcessPoolExecutor, as_completed
 import pandas as pd
 import numpy as np
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass
 
@@ -36,7 +36,8 @@ class BacktestEngine:
         config: object,
         start_date: datetime,
         end_date: datetime,
-        initial_capital: float = 10000.0
+        initial_capital: float = 10000.0,
+        output_dir: Optional[str] = None
     ):
         self.dm = data_manager
         self.config = config
@@ -44,6 +45,7 @@ class BacktestEngine:
         self.end_date = end_date
         self.capital = initial_capital
         self.equity = initial_capital
+        self.output_dir = output_dir
         
         self.trades: List[Trade] = []
         self.equity_curve: List[Dict] = []
@@ -52,6 +54,7 @@ class BacktestEngine:
         self.current_pair: Optional[SpreadPair] = None
         self.copula_model: Optional[CopulaModel] = None
         self.current_trade: Optional[Trade] = None
+        self.last_formation_time: Optional[datetime] = None
         
         # Create a mock client that redirects to DataManager
         # This ensures FormationManager uses cached data instead of hitting the API
@@ -78,6 +81,39 @@ class BacktestEngine:
             volatility_match_factor=config.risk_management.volatility_match_factor,
         )
 
+    def _get_next_scheduled_formation(self, current_time: datetime) -> datetime:
+        """Calculate the next scheduled formation time based on config."""
+        target_day_str = self.config.scheduler.formation_day_of_week.lower()
+        target_hour = self.config.scheduler.formation_hour
+        target_minute = self.config.scheduler.formation_minute
+        
+        days_map = {
+            'mon': 0, 'tue': 1, 'wed': 2, 'thu': 3, 'fri': 4, 'sat': 5, 'sun': 6
+        }
+        target_day = days_map.get(target_day_str, 0)
+        
+        # Ensure current_time is UTC-aware
+        if current_time.tzinfo is None:
+            current_time = current_time.replace(tzinfo=timezone.utc)
+            
+        # Calculate days ahead
+        current_day = current_time.weekday()
+        days_ahead = target_day - current_day
+        
+        # Create candidate time for this week
+        # We calculate the date offset first
+        candidate_date = current_time.date() + timedelta(days=days_ahead)
+        candidate_time = datetime.combine(
+            candidate_date, 
+            datetime.min.time().replace(hour=target_hour, minute=target_minute)
+        ).replace(tzinfo=timezone.utc)
+        
+        # If candidate is in the past, move to next week
+        if candidate_time < current_time:
+            candidate_time += timedelta(days=7)
+            
+        return candidate_time
+
     def run(self):
         """Run the backtest simulation."""
         logger.info(f"Starting backtest from {self.start_date} to {self.end_date}")
@@ -97,7 +133,14 @@ class BacktestEngine:
         
         # STEP 2: RUN SIMULATION
         current_time = self.start_date
-        next_formation_time = current_time
+        if current_time.tzinfo is None:
+            current_time = current_time.replace(tzinfo=timezone.utc)
+            
+        # Align with schedule
+        next_formation_time = self._get_next_scheduled_formation(current_time)
+        
+        if next_formation_time > current_time:
+            logger.info(f"Waiting for first formation scheduled at {next_formation_time}...")
         
         # Pre-fetch all data for BTC (master clock)
         # We iterate based on BTC timestamps to ensure alignment
@@ -115,11 +158,15 @@ class BacktestEngine:
         
         for ts in timestamps:
             current_time = ts
+            # Ensure current_time is UTC-aware
+            if current_time.tzinfo is None:
+                current_time = current_time.replace(tzinfo=timezone.utc)
             
             # 1. Check for Formation Event
             if current_time >= next_formation_time:
                 self._run_formation(current_time)
-                next_formation_time = current_time + timedelta(days=7) # Weekly formation
+                self.last_formation_time = current_time
+                next_formation_time = current_time + timedelta(days=self.config.trading.trading_days)
                 
             # 2. Execute Trading Cycle
             if self.copula_model:
@@ -147,7 +194,10 @@ class BacktestEngine:
             
         # Run formation with historical end time
         try:
-            spread_pair = self.formation_manager.run_formation(end_time=current_time)
+            spread_pair = self.formation_manager.run_formation(
+                end_time=current_time,
+                output_dir=self.output_dir
+            )
             
             if spread_pair:
                 self.current_pair = spread_pair
@@ -156,7 +206,7 @@ class BacktestEngine:
                     entry_threshold=self.config.trading.entry_threshold,
                     exit_threshold=self.config.trading.exit_threshold
                 )
-                logger.info(
+                logger.debug(
                     f"Selected pair: {spread_pair.alt1} - {spread_pair.alt2} "
                     f"(tau={spread_pair.tau:.4f}, rho={spread_pair.rho:.4f})"
                 )
@@ -171,6 +221,12 @@ class BacktestEngine:
 
     def _process_cycle(self, current_time: datetime):
         """Process a single trading cycle."""
+        # NO-TRADE ZONE: Do not trade for 15 minutes after formation
+        if self.last_formation_time:
+            time_since_formation = (current_time - self.last_formation_time).total_seconds() / 60
+            if time_since_formation < 15:
+                return
+
         # Get current prices
         prices = self._get_current_prices(current_time)
         if not prices:
@@ -301,7 +357,7 @@ class BacktestEngine:
             entry_price_alt2=prices[self.current_pair.alt2],
         )
         
-        logger.info(
+        logger.debug(
             f"[{timestamp}] OPEN {signal}: "
             f"{alt1_size:.2f} {self.current_pair.alt1} @ {prices[self.current_pair.alt1]}, "
             f"{alt2_size:.2f} {self.current_pair.alt2} @ {prices[self.current_pair.alt2]}"
@@ -330,20 +386,20 @@ class BacktestEngine:
         self.equity += pnl
         self.trades.append(self.current_trade)
         
-        logger.info(f"[{timestamp}] CLOSE ({reason}) PnL=${pnl:.2f}")
+        logger.debug(f"[{timestamp}] CLOSE ({reason}) PnL=${pnl:.2f}")
         
         self.current_trade = None
 
     def _calculate_pnl(self, trade: Trade) -> float:
         """Calculate trade PnL based on spread trading logic."""
         if trade.side == "LONG_S1_SHORT_S2":
-            # LONG S1 SHORT S2 = SELL ALT1, BUY ALT2
-            pnl_alt1 = -trade.size_alt1 * (trade.exit_price_alt1 - trade.entry_price_alt1)
-            pnl_alt2 = trade.size_alt2 * (trade.exit_price_alt2 - trade.entry_price_alt2)
-        else:  # SHORT_S1_LONG_S2
-            # SHORT S1 LONG S2 = BUY ALT1, SELL ALT2
+            # LONG S1 SHORT S2 = BUY ALT1, SELL ALT2
             pnl_alt1 = trade.size_alt1 * (trade.exit_price_alt1 - trade.entry_price_alt1)
             pnl_alt2 = -trade.size_alt2 * (trade.exit_price_alt2 - trade.entry_price_alt2)
+        else:  # SHORT_S1_LONG_S2
+            # SHORT S1 LONG S2 = SELL ALT1, BUY ALT2
+            pnl_alt1 = -trade.size_alt1 * (trade.exit_price_alt1 - trade.entry_price_alt1)
+            pnl_alt2 = trade.size_alt2 * (trade.exit_price_alt2 - trade.entry_price_alt2)
         
         return pnl_alt1 + pnl_alt2
 
@@ -386,12 +442,15 @@ class BacktestEngine:
         logger.info("All data cached! Starting parallel simulation...")
 
         # STEP 2: PREPARE CHUNKS
-        # We split time into 7-day chunks (formation periods)
+        # We split time into chunks based on formation schedule
         chunks = []
-        current_chunk_start = self.start_date
+        current_chunk_start = self._get_next_scheduled_formation(self.start_date)
+        
+        if current_chunk_start > self.start_date:
+             logger.info(f"Skipping initial period {self.start_date} -> {current_chunk_start} to align with schedule")
         
         while current_chunk_start < self.end_date:
-            current_chunk_end = min(current_chunk_start + timedelta(days=7), self.end_date)
+            current_chunk_end = min(current_chunk_start + timedelta(days=self.config.trading.trading_days), self.end_date)
             chunks.append((current_chunk_start, current_chunk_end))
             current_chunk_start = current_chunk_end
             
@@ -419,7 +478,8 @@ class BacktestEngine:
                     db_path,
                     api_key,
                     api_secret,
-                    is_final_chunk=(end == self.end_date)  # Only force-close on final chunk
+                    is_final_chunk=(end == self.end_date),  # Only force-close on final chunk
+                    output_dir=self.output_dir
                 ): (start, end) for start, end in chunks
             }
             
@@ -476,7 +536,8 @@ def process_backtest_chunk(
     db_path: str,
     api_key: str,
     api_secret: str,
-    is_final_chunk: bool = False
+    is_final_chunk: bool = False,
+    output_dir: Optional[str] = None
 ) -> Tuple[List[Trade], List[Dict]]:
     """
     Process a single backtest chunk (formation period) in a separate process.
@@ -510,7 +571,7 @@ def process_backtest_chunk(
     
     # 3. Run Formation
     # Formation uses data BEFORE start_time
-    spread_pair = fm.run_formation(end_time=start_time)
+    spread_pair = fm.run_formation(end_time=start_time, output_dir=output_dir)
     
     if not spread_pair:
         return [], []
@@ -558,6 +619,12 @@ def process_backtest_chunk(
     # We still need to iterate to handle trade state, but we don't calculate signals
     for i in range(len(timestamps)):
         ts = pd.to_datetime(timestamps[i]).tz_localize('UTC') if pd.to_datetime(timestamps[i]).tz is None else pd.to_datetime(timestamps[i])
+        
+        # NO-TRADE ZONE: Do not trade for 15 minutes after formation (start_time)
+        # start_time is the formation time for this chunk
+        if (ts - start_time).total_seconds() < 15 * 60:
+            continue
+            
         signal = signals[i]
         
         # Current prices
@@ -575,11 +642,11 @@ def process_backtest_chunk(
             
             # Calculate Unrealized PnL
             if current_trade.side == "LONG_S1_SHORT_S2":
-                pnl_alt1 = -current_trade.size_alt1 * (prices[spread_pair.alt1] - current_trade.entry_price_alt1)
-                pnl_alt2 = current_trade.size_alt2 * (prices[spread_pair.alt2] - current_trade.entry_price_alt2)
-            else:
                 pnl_alt1 = current_trade.size_alt1 * (prices[spread_pair.alt1] - current_trade.entry_price_alt1)
                 pnl_alt2 = -current_trade.size_alt2 * (prices[spread_pair.alt2] - current_trade.entry_price_alt2)
+            else:
+                pnl_alt1 = -current_trade.size_alt1 * (prices[spread_pair.alt1] - current_trade.entry_price_alt1)
+                pnl_alt2 = current_trade.size_alt2 * (prices[spread_pair.alt2] - current_trade.entry_price_alt2)
             
             unrealized_pnl = pnl_alt1 + pnl_alt2
             
@@ -648,11 +715,11 @@ def process_backtest_chunk(
         
         # Recalculate PnL
         if current_trade.side == "LONG_S1_SHORT_S2":
-            pnl_alt1 = -current_trade.size_alt1 * (current_trade.exit_price_alt1 - current_trade.entry_price_alt1)
-            pnl_alt2 = current_trade.size_alt2 * (current_trade.exit_price_alt2 - current_trade.entry_price_alt2)
-        else:
             pnl_alt1 = current_trade.size_alt1 * (current_trade.exit_price_alt1 - current_trade.entry_price_alt1)
             pnl_alt2 = -current_trade.size_alt2 * (current_trade.exit_price_alt2 - current_trade.entry_price_alt2)
+        else:
+            pnl_alt1 = -current_trade.size_alt1 * (current_trade.exit_price_alt1 - current_trade.entry_price_alt1)
+            pnl_alt2 = current_trade.size_alt2 * (current_trade.exit_price_alt2 - current_trade.entry_price_alt2)
             
         current_trade.pnl = pnl_alt1 + pnl_alt2
         current_trade.status = "CLOSED"

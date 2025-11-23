@@ -92,6 +92,28 @@ class TradingManager:
         logger.info(f"TRADING CYCLE: {datetime.now(timezone.utc).isoformat()}")
         logger.info("-" * 80)
 
+        # NO-TRADE ZONE: Check if we are within 15 minutes of formation
+        if self.state_manager:
+            try:
+                state = self.state_manager.load_state()
+                formation_time_str = state.get('formation_timestamp')
+                if formation_time_str:
+                    formation_dt = datetime.fromisoformat(formation_time_str.replace('Z', '+00:00'))
+                    if formation_dt.tzinfo is None:
+                        formation_dt = formation_dt.replace(tzinfo=timezone.utc)
+                    
+                    current_time = datetime.now(timezone.utc)
+                    time_since_formation = (current_time - formation_dt).total_seconds() / 60
+                    
+                    if time_since_formation < 15:
+                        logger.info(f"In No-Trade Zone ({time_since_formation:.1f}m since formation). Waiting...")
+                        return {
+                            "status": "waiting", 
+                            "message": f"No-Trade Zone: {time_since_formation:.1f}m < 15m"
+                        }
+            except Exception as e:
+                logger.error(f"Error checking formation time: {e}")
+
         # Log current positions and PnL at start of each cycle
         self._log_positions_and_pnl()
         logger.info("")  # Blank line for readability
@@ -643,12 +665,12 @@ class TradingManager:
         )
 
         # Map actual positions to spread signal names
-        # LONG ALT1 + SHORT ALT2 = SHORT S1, LONG S2 (by spread trading logic)
+        # LONG ALT1 + SHORT ALT2 = LONG S1, SHORT S2 (by new spread logic)
         if alt1_amt > 0 and alt2_amt < 0:
-            return "SHORT_S1_LONG_S2"
-        # SHORT ALT1 + LONG ALT2 = LONG S1, SHORT S2 (by spread trading logic)
-        elif alt1_amt < 0 and alt2_amt > 0:
             return "LONG_S1_SHORT_S2"
+        # SHORT ALT1 + LONG ALT2 = SHORT S1, LONG S2 (by new spread logic)
+        elif alt1_amt < 0 and alt2_amt > 0:
+            return "SHORT_S1_LONG_S2"
         elif alt1_amt == 0 and alt2_amt == 0:
             return None
         else:

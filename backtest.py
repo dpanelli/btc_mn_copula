@@ -67,7 +67,8 @@ def main():
         config=config,
         start_date=start_date,
         end_date=end_date,
-        initial_capital=args.initial_capital
+        initial_capital=args.initial_capital,
+        output_dir=args.output
     )
     
     if args.parallel:
@@ -95,18 +96,7 @@ def main():
         for trade in engine.trades:
             # Calculate leg PnLs
             if trade.side == "LONG_S1_SHORT_S2":
-                # LONG S1 SHORT S2 = SELL ALT1, BUY ALT2
-                # Short Side: ALT1
-                # Long Side: ALT2
-                alt1, alt2 = trade.pair.split("-")
-                short_side = alt1
-                long_side = alt2
-                
-                pnl_short = -trade.size_alt1 * (trade.exit_price_alt1 - trade.entry_price_alt1)
-                pnl_long = trade.size_alt2 * (trade.exit_price_alt2 - trade.entry_price_alt2)
-                
-            else:  # SHORT_S1_LONG_S2
-                # SHORT S1 LONG S2 = BUY ALT1, SELL ALT2
+                # LONG S1 SHORT S2 = BUY ALT1, SELL ALT2
                 # Long Side: ALT1
                 # Short Side: ALT2
                 alt1, alt2 = trade.pair.split("-")
@@ -115,6 +105,17 @@ def main():
                 
                 pnl_long = trade.size_alt1 * (trade.exit_price_alt1 - trade.entry_price_alt1)
                 pnl_short = -trade.size_alt2 * (trade.exit_price_alt2 - trade.entry_price_alt2)
+                
+            else:  # SHORT_S1_LONG_S2
+                # SHORT S1 LONG S2 = SELL ALT1, BUY ALT2
+                # Short Side: ALT1
+                # Long Side: ALT2
+                alt1, alt2 = trade.pair.split("-")
+                short_side = alt1
+                long_side = alt2
+                
+                pnl_short = -trade.size_alt1 * (trade.exit_price_alt1 - trade.entry_price_alt1)
+                pnl_long = trade.size_alt2 * (trade.exit_price_alt2 - trade.entry_price_alt2)
                 
             trades_data.append({
                 "start_time": trade.entry_time,

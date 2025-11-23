@@ -53,7 +53,7 @@ class FormationManager:
         self.btc_symbol = "BTCUSDT"
         self.blacklisted_coins = set()
 
-    def run_formation(self, end_time: Optional[datetime] = None) -> Optional[SpreadPair]:
+    def run_formation(self, end_time: Optional[datetime] = None, output_dir: Optional[str] = None) -> Optional[SpreadPair]:
         """
         Run the formation phase to select and fit the best trading pair.
 
@@ -186,13 +186,13 @@ class FormationManager:
                 # Create spread pair
                 pair = SpreadPair(alt1, alt2)
 
-                # Calculate spread 1: BTC - β1*ALT1
-                spread1, beta1 = calculate_spread(prices_btc, prices_alt1)
+                # Calculate spread 1: ALT1 - β1*BTC
+                spread1, beta1 = calculate_spread(target_prices=prices_alt1, reference_prices=prices_btc)
                 pair.beta1 = beta1
                 pair.spread1_data = spread1
 
-                # Calculate spread 2: BTC - β2*ALT2
-                spread2, beta2 = calculate_spread(prices_btc, prices_alt2)
+                # Calculate spread 2: ALT2 - β2*BTC
+                spread2, beta2 = calculate_spread(target_prices=prices_alt2, reference_prices=prices_btc)
                 pair.beta2 = beta2
                 pair.spread2_data = spread2
 
@@ -228,6 +228,33 @@ class FormationManager:
 
         # Step 5: Select top pair by highest |tau|
         cointegrated_pairs.sort(key=lambda x: x[1], reverse=True)
+
+        # Save candidates to CSV if output_dir is provided
+        if output_dir:
+            try:
+                import os
+                formations_dir = os.path.join(output_dir, "formations")
+                os.makedirs(formations_dir, exist_ok=True)
+                
+                # Format timestamp for filename
+                ts_str = end_time.strftime("%Y%m%d_%H%M%S")
+                filename = os.path.join(formations_dir, f"formation_candidates_{ts_str}.csv")
+                
+                candidates_data = []
+                for pair, tau in cointegrated_pairs:
+                    candidates_data.append({
+                        "pair": f"{pair.alt1}-{pair.alt2}",
+                        "tau": tau,
+                        "beta1": pair.beta1,
+                        "beta2": pair.beta2,
+                        # We don't have p-value stored in pair object, but we logged it earlier
+                        # For now, just saving what we have
+                    })
+                
+                pd.DataFrame(candidates_data).to_csv(filename, index=False)
+                logger.info(f"Saved {len(candidates_data)} formation candidates to {filename}")
+            except Exception as e:
+                logger.error(f"Error saving formation candidates CSV: {e}")
 
         logger.info(f"\n{'=' * 80}")
         logger.info(f"Found {len(cointegrated_pairs)} cointegrated pairs:")

@@ -38,22 +38,23 @@ class SpreadPair:
 
 
 def calculate_spread(
-    btc_prices: np.ndarray, alt_prices: np.ndarray
+    target_prices: np.ndarray, reference_prices: np.ndarray
 ) -> Tuple[np.ndarray, float]:
     """
-    Calculate spread S = BTC - β*ALT using OLS regression.
+    Calculate spread S = Target - β*Reference using OLS regression.
+    Typically: Target=ALT, Reference=BTC.
 
     Args:
-        btc_prices: BTC price series
-        alt_prices: Altcoin price series
+        target_prices: Target asset price series (e.g., ALT)
+        reference_prices: Reference asset price series (e.g., BTC)
 
     Returns:
         Tuple of (spread series, beta coefficient)
     """
-    # OLS regression: BTC = β*ALT + α
+    # OLS regression: Target = β*Reference + α
     # We use numpy's least squares
-    X = alt_prices.reshape(-1, 1)
-    y = btc_prices
+    X = reference_prices.reshape(-1, 1)
+    y = target_prices
 
     # Add intercept
     X_with_intercept = np.column_stack([np.ones(len(X)), X])
@@ -62,8 +63,8 @@ def calculate_spread(
     coeffs, residuals, rank, s = np.linalg.lstsq(X_with_intercept, y, rcond=None)
     alpha, beta = coeffs
 
-    # Calculate spread
-    spread = btc_prices - beta * alt_prices
+    # Calculate spread: S = Target - β*Reference
+    spread = target_prices - beta * reference_prices
 
     logger.debug(f"OLS regression: β={beta:.6f}, α={alpha:.6f}")
     return spread, beta
@@ -316,9 +317,9 @@ class CopulaModel:
         Returns:
             DataFrame with columns: signal, h_1_given_2, h_2_given_1
         """
-        # Calculate spreads
-        s1 = btc_prices - self.spread_pair.beta1 * alt1_prices
-        s2 = btc_prices - self.spread_pair.beta2 * alt2_prices
+        # Calculate spreads: S = ALT - β * BTC
+        s1 = alt1_prices - self.spread_pair.beta1 * btc_prices
+        s2 = alt2_prices - self.spread_pair.beta2 * btc_prices
 
         # Transform to uniform margins
         u1 = self._transform_to_uniform_vectorized(s1, self.sorted_spread1)
@@ -413,9 +414,9 @@ class CopulaModel:
                 - distance_1: Distance of h_1_given_2 from 0.5
                 - distance_2: Distance of h_2_given_1 from 0.5
         """
-        # Calculate current spreads
-        s1 = btc_price - self.spread_pair.beta1 * alt1_price
-        s2 = btc_price - self.spread_pair.beta2 * alt2_price
+        # Calculate current spreads: S = ALT - β * BTC
+        s1 = alt1_price - self.spread_pair.beta1 * btc_price
+        s2 = alt2_price - self.spread_pair.beta2 * btc_price
 
         # Transform to uniform margins using historical data
         u1 = self._transform_to_uniform(s1, self.spread_pair.spread1_data)
@@ -537,9 +538,9 @@ class CopulaModel:
 
         Signal translation:
         - LONG S1, SHORT S2 means:
-          * S1 = BTC - β1*ALT1 increases → LONG β1*ALT1, keep BTC neutral
-          * S2 = BTC - β2*ALT2 decreases → SHORT β2*ALT2, keep BTC neutral
-          * Net: LONG β1*ALT1, SHORT β2*ALT2 (BTC cancels out as intermediary)
+          * S1 = ALT1 - β1*BTC increases → LONG ALT1, SHORT β1*BTC
+          * S2 = ALT2 - β2*BTC decreases → SHORT ALT2, LONG β2*BTC
+          * Net: LONG ALT1, SHORT ALT2 (BTC cancels out as intermediary)
 
         Args:
             signal: Trading signal
@@ -549,21 +550,21 @@ class CopulaModel:
             Dict mapping symbol to (side, capital_usdt)
         """
         if signal == "LONG_S1_SHORT_S2":
-            # LONG spread 1 (SELL β1*ALT1), SHORT spread 2 (BUY β2*ALT2)
-            # S1 = BTC - β1*ALT1. To LONG S1 (bet on increase), we need S1 to go up.
-            # Since β1 is positive, we need ALT1 to go DOWN relative to BTC. So we SELL ALT1.
-            # S2 = BTC - β2*ALT2. To SHORT S2 (bet on decrease), we need S2 to go down.
-            # Since β2 is positive, we need ALT2 to go UP relative to BTC. So we BUY ALT2.
-            return {
-                self.spread_pair.alt1: ("SELL", capital_per_leg),
-                self.spread_pair.alt2: ("BUY", capital_per_leg),
-            }
-        elif signal == "SHORT_S1_LONG_S2":
-            # SHORT spread 1 (BUY β1*ALT1), LONG spread 2 (SELL β2*ALT2)
-            # Inverse of above.
+            # LONG spread 1 (BUY ALT1), SHORT spread 2 (SELL ALT2)
+            # S1 = ALT1 - β1*BTC. To LONG S1 (bet on increase), we need ALT1 to go UP relative to BTC.
+            # So we BUY ALT1.
+            # S2 = ALT2 - β2*BTC. To SHORT S2 (bet on decrease), we need ALT2 to go DOWN relative to BTC.
+            # So we SELL ALT2.
             return {
                 self.spread_pair.alt1: ("BUY", capital_per_leg),
                 self.spread_pair.alt2: ("SELL", capital_per_leg),
+            }
+        elif signal == "SHORT_S1_LONG_S2":
+            # SHORT spread 1 (SELL ALT1), LONG spread 2 (BUY ALT2)
+            # Inverse of above.
+            return {
+                self.spread_pair.alt1: ("SELL", capital_per_leg),
+                self.spread_pair.alt2: ("BUY", capital_per_leg),
             }
         elif signal == "CLOSE":
             return {
