@@ -29,11 +29,11 @@ def test_short_s1_long_s2_position_detection():
     trading_manager.set_spread_pair(spread_pair)
     
     # Simulate positions after executing SHORT_S1_LONG_S2:
-    # - Signal places: BUY ADAUSDT, SELL AVAXUSDT
-    # - Results in: LONG ADAUSDT (+), SHORT AVAXUSDT (-)
+    # - Signal places: SELL ADAUSDT, BUY AVAXUSDT (corrected logic)
+    # - Results in: SHORT ADAUSDT (-), LONG AVAXUSDT (+)
     mock_client.get_position.side_effect = [
-        {"position_amt": 250.0},   # ADAUSDT: LONG (positive)
-        {"position_amt": -8.0},    # AVAXUSDT: SHORT (negative)
+        {"position_amt": -250.0},  # ADAUSDT: SHORT (negative)
+        {"position_amt": 8.0},     # AVAXUSDT: LONG (positive)
     ]
     
     # Get detected position type
@@ -42,8 +42,8 @@ def test_short_s1_long_s2_position_detection():
     # Should correctly identify as SHORT_S1_LONG_S2
     assert detected_type == "SHORT_S1_LONG_S2", (
         f"Expected 'SHORT_S1_LONG_S2' but got '{detected_type}'. "
-        f"Signal SHORT_S1_LONG_S2 places BUY ALT1 SELL ALT2, "
-        f"creating LONG ALT1 (+250) SHORT ALT2 (-8) positions."
+        f"Signal SHORT_S1_LONG_S2 places SELL ALT1 BUY ALT2, "
+        f"creating SHORT ALT1 (-250) LONG ALT2 (+8) positions."
     )
     
     print("✓ SHORT_S1_LONG_S2 detection CORRECT")
@@ -74,11 +74,11 @@ def test_long_s1_short_s2_position_detection():
     trading_manager.set_spread_pair(spread_pair)
     
     # Simulate positions after executing LONG_S1_SHORT_S2:
-    # - Signal places: SELL ADAUSDT, BUY AVAXUSDT
-    # - Results in: SHORT ADAUSDT (-), LONG AVAXUSDT (+)
+    # - Signal places: BUY ADAUSDT, SELL AVAXUSDT (corrected logic)
+    # - Results in: LONG ADAUSDT (+), SHORT AVAXUSDT (-)
     mock_client.get_position.side_effect = [
-        {"position_amt": -250.0},  # ADAUSDT: SHORT (negative)
-        {"position_amt": 8.0},     # AVAXUSDT: LONG (positive)
+        {"position_amt": 250.0},   # ADAUSDT: LONG (positive)
+        {"position_amt": -8.0},    # AVAXUSDT: SHORT (negative)
     ]
     
     # Get detected position type
@@ -87,8 +87,8 @@ def test_long_s1_short_s2_position_detection():
     # Should correctly identify as LONG_S1_SHORT_S2
     assert detected_type == "LONG_S1_SHORT_S2", (
         f"Expected 'LONG_S1_SHORT_S2' but got '{detected_type}'. "
-        f"Signal LONG_S1_SHORT_S2 places SELL ALT1 BUY ALT2, "
-        f"creating SHORT ALT1 (-250) LONG ALT2 (+8) positions."
+        f"Signal LONG_S1_SHORT_S2 places BUY ALT1 SELL ALT2, "
+        f"creating LONG ALT1 (+250) SHORT ALT2 (-8) positions."
     )
     
     print("✓ LONG_S1_SHORT_S2 detection CORRECT")
@@ -122,22 +122,23 @@ def test_no_position_flipping():
     test_cases = [
         {
             "signal": "SHORT_S1_LONG_S2",
-            "orders": [("BUY", "ADAUSDT"), ("SELL", "AVAXUSDT")],
-            "positions": [250.0, -8.0],  # LONG ADA, SHORT AVAX
+            "orders": [("SELL", "ADAUSDT"), ("BUY", "AVAXUSDT")],
+            "positions": [-250.0, 8.0],  # SHORT ADA, LONG AVAX
             "expected": "SHORT_S1_LONG_S2",
         },
         {
             "signal": "LONG_S1_SHORT_S2",
-            "orders": [("SELL", "ADAUSDT"), ("BUY", "AVAXUSDT")],
-            "positions": [-250.0, 8.0],  # SHORT ADA, LONG AVAX
+            "orders": [("BUY", "ADAUSDT"), ("SELL", "AVAXUSDT")],
+            "positions": [250.0, -8.0],  # LONG ADA, SHORT AVAX
             "expected": "LONG_S1_SHORT_S2",
         },
     ]
     
     for case in test_cases:
         # Get orders that would be placed for this signal
-        orders = trading_manager.copula_model.get_position_quantities(
-            case["signal"], 20000
+        prices = {"ADAUSDT": 0.5, "AVAXUSDT": 50.0}
+        orders = trading_manager.strategy.get_target_positions(
+            case["signal"], prices
         )
         
         # Verify orders match expected

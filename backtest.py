@@ -166,12 +166,16 @@ def main():
         tearsheet_dir = f"{args.output}/tearsheet"
         os.makedirs(tearsheet_dir, exist_ok=True)
         
+        # Configure QuantStats for crypto markets (365 trading days)
+        qs.stats.TRADING_DAYS_PER_YEAR = 365
+        
         # Generate report
         qs.reports.html(
             returns_series,
             output=f"{tearsheet_dir}/report.html",
             title="BTC-MN Copula Strategy Backtest",
-            download_filename="report.html"
+            download_filename="report.html",
+            periods_per_year=365  # Crypto trades 24/7
         )
         print(f"QuantStats report saved to {tearsheet_dir}/report.html")
         

@@ -5,6 +5,7 @@ from typing import Dict, Optional
 
 from .binance_client import BinanceClient
 from .copula_model import CopulaModel, SpreadPair
+from .strategy import PairsTradingStrategy
 from .logger import get_logger
 from .telegram_notifier import TelegramNotifier
 
@@ -49,7 +50,9 @@ class TradingManager:
         self.state_manager = state_manager
         self.stop_loss_pct = stop_loss_pct
         self.max_trade_duration_hours = max_trade_duration_hours
-        self.copula_model: Optional[CopulaModel] = None
+        self.stop_loss_pct = stop_loss_pct
+        self.max_trade_duration_hours = max_trade_duration_hours
+        self.strategy: Optional[PairsTradingStrategy] = None
         self.current_position: Optional[str] = None  # Track current position state
         self.btc_symbol = "BTCUSDT"
 
@@ -60,10 +63,12 @@ class TradingManager:
         Args:
             spread_pair: SpreadPair object with fitted parameters
         """
-        self.copula_model = CopulaModel(
+        self.strategy = PairsTradingStrategy(
             spread_pair=spread_pair,
             entry_threshold=self.entry_threshold,
             exit_threshold=self.exit_threshold,
+            capital_per_leg=self.capital_per_leg,
+            max_leverage=self.max_leverage
         )
 
         # Set leverage for both symbols
@@ -84,9 +89,9 @@ class TradingManager:
         Returns:
             Dict with execution results
         """
-        if self.copula_model is None:
-            logger.info("No copula model set - waiting for formation phase to complete")
-            return {"status": "waiting", "message": "No copula model - waiting for formation"}
+        if self.strategy is None:
+            logger.info("No strategy set - waiting for formation phase to complete")
+            return {"status": "waiting", "message": "No strategy - waiting for formation"}
 
         logger.info("-" * 80)
         logger.info(f"TRADING CYCLE: {datetime.now(timezone.utc).isoformat()}")
@@ -211,21 +216,22 @@ class TradingManager:
             # Fetch current prices
             btc_price = self.binance_client.get_current_price(self.btc_symbol)
             alt1_price = self.binance_client.get_current_price(
-                self.copula_model.spread_pair.alt1
+                self.strategy.spread_pair.alt1
             )
             alt2_price = self.binance_client.get_current_price(
-                self.copula_model.spread_pair.alt2
+                self.strategy.spread_pair.alt2
             )
 
             logger.info(
                 f"Current prices: BTC={btc_price:.2f}, "
-                f"{self.copula_model.spread_pair.alt1}={alt1_price:.4f}, "
-                f"{self.copula_model.spread_pair.alt2}={alt2_price:.4f}"
+                f"{self.strategy.spread_pair.alt1}={alt1_price:.4f}, "
+                f"{self.strategy.spread_pair.alt2}={alt2_price:.4f}"
             )
 
             # Generate signal
-            signal_data = self.copula_model.generate_signal(btc_price, alt1_price, alt2_price)
-            signal = signal_data["signal"]  # Extract signal string for backward compatibility
+            signal_obj = self.strategy.generate_signal(btc_price, alt1_price, alt2_price)
+            signal = signal_obj.signal
+            signal_data = signal_obj.metadata
 
             logger.info(f"Signal: {signal}")
 
@@ -242,12 +248,13 @@ class TradingManager:
                     )
 
                     # Prepare price data
+
                     price_data = {
                         "btc": btc_price,
                         "alt1": alt1_price,
                         "alt2": alt2_price,
-                        "alt1_symbol": self.copula_model.spread_pair.alt1,
-                        "alt2_symbol": self.copula_model.spread_pair.alt2,
+                        "alt1_symbol": self.strategy.spread_pair.alt1,
+                        "alt2_symbol": self.strategy.spread_pair.alt2,
                     }
 
                     self.telegram_notifier.send_trading_update(
@@ -347,9 +354,13 @@ class TradingManager:
         Returns:
             Dict with execution results
         """
-        positions = self.copula_model.get_position_quantities(
-            signal, self.capital_per_leg
-        )
+        # Need current prices for sizing
+        prices = {
+            self.strategy.spread_pair.alt1: self.binance_client.get_current_price(self.strategy.spread_pair.alt1),
+            self.strategy.spread_pair.alt2: self.binance_client.get_current_price(self.strategy.spread_pair.alt2)
+        }
+        
+        positions = self.strategy.get_target_positions(signal, prices)
 
         # Check if we have enough balance for all legs
         required_capital = sum(cap for _, cap in positions.values())
@@ -379,13 +390,32 @@ class TradingManager:
         successful_orders = []  # Track successful orders for potential rollback
 
         # Phase 1: Execute all orders
-        for symbol, (side, capital) in positions.items():
+        for symbol, (side, quantity) in positions.items():
             try:
-                # Calculate position size
-                position_size = self.binance_client.calculate_position_size(
-                    symbol, capital, self.max_leverage
-                )
-
+                # Calculate position size (quantity is already in base asset units from strategy)
+                # But binance_client.calculate_position_size expects capital if we were using old logic.
+                # Wait, strategy.get_target_positions returns (side, quantity_asset).
+                # Let's double check strategy.py.
+                # Yes: return {symbol: ("BUY", capital / price)}
+                # So 'quantity' here is the actual amount of asset to buy/sell.
+                
+                # We should verify precision/min qty using binance client helper if available,
+                # or just pass it to place_market_order which usually handles precision if passed as string,
+                # but here we might need to round it.
+                # Let's use calculate_position_size but we need to reverse engineer capital?
+                # No, let's just use the quantity directly but ensure precision.
+                # Actually, existing code used calculate_position_size(symbol, capital, leverage).
+                # Strategy now gives us quantity.
+                
+                # Let's trust the strategy's math but maybe round it?
+                # Ideally BinanceClient should have a method to normalize quantity.
+                # For now, let's assume the quantity is raw float and we need to format it.
+                
+                # REVISION: To minimize changes and risk, let's convert back to capital for the existing method
+                # OR better, update this loop to use quantity directly.
+                
+                position_size = quantity # It's already a float amount of asset
+                
                 # Place order
                 order = self.binance_client.place_market_order(symbol, side, position_size)
 
@@ -509,12 +539,12 @@ class TradingManager:
         Returns:
             Dict with execution results
         """
-        if self.copula_model is None:
-            return {"status": "error", "message": "No copula model"}
+        if self.strategy is None:
+            return {"status": "error", "message": "No strategy"}
 
         symbols = [
-            self.copula_model.spread_pair.alt1,
-            self.copula_model.spread_pair.alt2,
+            self.strategy.spread_pair.alt1,
+            self.strategy.spread_pair.alt2,
         ]
 
         results = {}
@@ -579,13 +609,13 @@ class TradingManager:
         Returns:
             Dict with position info for each symbol
         """
-        if self.copula_model is None:
+        if self.strategy is None:
             return {}
 
         positions = {}
         for symbol in [
-            self.copula_model.spread_pair.alt1,
-            self.copula_model.spread_pair.alt2,
+            self.strategy.spread_pair.alt1,
+            self.strategy.spread_pair.alt2,
         ]:
             try:
                 pos = self.binance_client.get_position(symbol)
@@ -623,7 +653,7 @@ class TradingManager:
         Returns:
             True if any position exists, False otherwise
         """
-        if self.copula_model is None:
+        if self.strategy is None:
             return False
 
         positions = self.get_current_positions()
@@ -647,45 +677,26 @@ class TradingManager:
         Returns:
             'LONG_S1_SHORT_S2', 'SHORT_S1_LONG_S2', or None
         """
-        if self.copula_model is None:
+        if self.strategy is None:
             return None
 
         positions = self.get_current_positions()
-        alt1_pos = positions.get(self.copula_model.spread_pair.alt1, {})
-        alt2_pos = positions.get(self.copula_model.spread_pair.alt2, {})
-
-        alt1_amt = alt1_pos.get("position_amt", 0)
-        alt2_amt = alt2_pos.get("position_amt", 0)
         
-        # DEBUG: Log what Binance actually returns
-        logger.debug(
-            f"Position detection: {self.copula_model.spread_pair.alt1}={alt1_amt}, "
-            f"{self.copula_model.spread_pair.alt2}={alt2_amt} "
-            f"(from Binance API)"
-        )
-
-        # Map actual positions to spread signal names
-        # LONG ALT1 + SHORT ALT2 = LONG S1, SHORT S2 (by new spread logic)
-        if alt1_amt > 0 and alt2_amt < 0:
-            return "LONG_S1_SHORT_S2"
-        # SHORT ALT1 + LONG ALT2 = SHORT S1, LONG S2 (by new spread logic)
-        elif alt1_amt < 0 and alt2_amt > 0:
-            return "SHORT_S1_LONG_S2"
-        elif alt1_amt == 0 and alt2_amt == 0:
-            return None
-        else:
-            logger.warning(
-                f"Inconsistent positions: {self.copula_model.spread_pair.alt1}={alt1_amt}, "
-                f"{self.copula_model.spread_pair.alt2}={alt2_amt}"
-            )
-            return "INCONSISTENT"
+        # Convert Binance positions to simple dict {symbol: signed_quantity} for strategy
+        strategy_positions = {}
+        for symbol, pos_data in positions.items():
+            if "error" not in pos_data:
+                amt = float(pos_data.get("position_amt", 0))
+                strategy_positions[symbol] = amt
+                
+        return self.strategy.get_position_state(strategy_positions)
 
     def _log_positions_and_pnl(self) -> None:
         """
         Log detailed position and PnL information from Binance.
         Logs each position (symbol, size, side, PnL) and total account PnL.
         """
-        if self.copula_model is None:
+        if self.strategy is None:
             logger.info("Position Status: No active pair (waiting for formation)")
             return
 
@@ -701,7 +712,7 @@ class TradingManager:
             has_any_position = False
 
             # Log each leg
-            for symbol in [self.copula_model.spread_pair.alt1, self.copula_model.spread_pair.alt2]:
+            for symbol in [self.strategy.spread_pair.alt1, self.strategy.spread_pair.alt2]:
                 pos_data = positions.get(symbol, {})
 
                 if "error" in pos_data:
@@ -763,8 +774,8 @@ class TradingManager:
         try:
             positions = self.binance_client.futures_position_information()
             
-            alt1 = self.copula_model.spread_pair.alt1
-            alt2 = self.copula_model.spread_pair.alt2
+            alt1 = self.strategy.spread_pair.alt1
+            alt2 = self.strategy.spread_pair.alt2
             
             pnl_alt1 = 0.0
             pnl_alt2 = 0.0

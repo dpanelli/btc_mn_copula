@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from src.binance_client import BinanceClient
 from src.formation import FormationManager
 from src.copula_model import CopulaModel, SpreadPair
+from src.strategy import PairsTradingStrategy
 from src.logger import get_logger
 from src.backtesting.data_manager import DataManager
 
@@ -52,7 +53,7 @@ class BacktestEngine:
         
         # State
         self.current_pair: Optional[SpreadPair] = None
-        self.copula_model: Optional[CopulaModel] = None
+        self.strategy: Optional[PairsTradingStrategy] = None
         self.current_trade: Optional[Trade] = None
         self.last_formation_time: Optional[datetime] = None
         
@@ -169,7 +170,7 @@ class BacktestEngine:
                 next_formation_time = current_time + timedelta(days=self.config.trading.trading_days)
                 
             # 2. Execute Trading Cycle
-            if self.copula_model:
+            if self.strategy:
                 self._process_cycle(current_time)
             
             # 3. Update Equity
@@ -201,10 +202,11 @@ class BacktestEngine:
             
             if spread_pair:
                 self.current_pair = spread_pair
-                self.copula_model = CopulaModel(
-                    spread_pair,
+                self.strategy = PairsTradingStrategy(
+                    spread_pair=spread_pair,
                     entry_threshold=self.config.trading.entry_threshold,
-                    exit_threshold=self.config.trading.exit_threshold
+                    exit_threshold=self.config.trading.exit_threshold,
+                    capital_per_leg=self.config.trading.capital_per_leg
                 )
                 logger.debug(
                     f"Selected pair: {spread_pair.alt1} - {spread_pair.alt2} "
@@ -213,11 +215,11 @@ class BacktestEngine:
             else:
                 logger.warning("Formation failed - no suitable pairs found")
                 self.current_pair = None
-                self.copula_model = None
+                self.strategy = None
         except Exception as e:
             logger.error(f"Formation error: {e}")
             self.current_pair = None
-            self.copula_model = None
+            self.strategy = None
 
     def _process_cycle(self, current_time: datetime):
         """Process a single trading cycle."""
@@ -259,13 +261,13 @@ class BacktestEngine:
                 return
 
         # Generate signal
-        signal_data = self.copula_model.generate_signal(
+        signal_obj = self.strategy.generate_signal(
             prices['BTCUSDT'],
             prices[self.current_pair.alt1],
             prices[self.current_pair.alt2]
         )
         
-        signal = signal_data['signal']
+        signal = signal_obj.signal
         
         # Execute signal
         if signal in ['LONG_S1_SHORT_S2', 'SHORT_S1_LONG_S2']:
@@ -342,9 +344,12 @@ class BacktestEngine:
         """Open a new trade."""
         pair_name = f"{self.current_pair.alt1}-{self.current_pair.alt2}"
         
-        # Calculate position sizes
-        alt1_size = self.config.trading.capital_per_leg / prices[self.current_pair.alt1]
-        alt2_size = self.config.trading.capital_per_leg / prices[self.current_pair.alt2]
+        # Calculate position sizes using strategy
+        target_positions = self.strategy.get_target_positions(signal, prices)
+        
+        # Extract sizes (quantity)
+        alt1_size = target_positions[self.current_pair.alt1][1]
+        alt2_size = target_positions[self.current_pair.alt2][1]
         
         self.current_trade = Trade(
             entry_time=timestamp,
@@ -391,17 +396,27 @@ class BacktestEngine:
         self.current_trade = None
 
     def _calculate_pnl(self, trade: Trade) -> float:
-        """Calculate trade PnL based on spread trading logic."""
-        if trade.side == "LONG_S1_SHORT_S2":
-            # LONG S1 SHORT S2 = BUY ALT1, SELL ALT2
-            pnl_alt1 = trade.size_alt1 * (trade.exit_price_alt1 - trade.entry_price_alt1)
-            pnl_alt2 = -trade.size_alt2 * (trade.exit_price_alt2 - trade.entry_price_alt2)
-        else:  # SHORT_S1_LONG_S2
-            # SHORT S1 LONG S2 = SELL ALT1, BUY ALT2
-            pnl_alt1 = -trade.size_alt1 * (trade.exit_price_alt1 - trade.entry_price_alt1)
-            pnl_alt2 = trade.size_alt2 * (trade.exit_price_alt2 - trade.entry_price_alt2)
+        """Calculate trade PnL using centralized strategy logic."""
+        if not self.strategy:
+            # Fallback if strategy not initialized (shouldn't happen during active trade)
+            return 0.0
+            
+        entry_prices = {
+            self.current_pair.alt1: trade.entry_price_alt1,
+            self.current_pair.alt2: trade.entry_price_alt2
+        }
         
-        return pnl_alt1 + pnl_alt2
+        exit_prices = {
+            self.current_pair.alt1: trade.exit_price_alt1,
+            self.current_pair.alt2: trade.exit_price_alt2
+        }
+        
+        quantities = {
+            self.current_pair.alt1: trade.size_alt1,
+            self.current_pair.alt2: trade.size_alt2
+        }
+        
+        return self.strategy.calculate_pnl(entry_prices, exit_prices, quantities, trade.side)
 
     def _calculate_unrealized_pnl(self, current_time: datetime, prices: Dict[str, float]) -> float:
         """Calculate unrealized PnL for the current open trade."""
@@ -576,12 +591,15 @@ def process_backtest_chunk(
     if not spread_pair:
         return [], []
         
-    # 4. Initialize Copula Model
-    model = CopulaModel(
-        spread_pair,
+    # 4. Initialize Strategy
+    strategy = PairsTradingStrategy(
+        spread_pair=spread_pair,
         entry_threshold=config.trading.entry_threshold,
-        exit_threshold=config.trading.exit_threshold
+        exit_threshold=config.trading.exit_threshold,
+        capital_per_leg=config.trading.capital_per_leg
     )
+    # We still need the model for vectorized signal generation
+    model = strategy.model
     
     # 5. Fetch Data for the Chunk
     # We need BTC, Alt1, Alt2 for the whole chunk
@@ -641,14 +659,20 @@ def process_backtest_chunk(
             # Re-implementing simplified PnL calc here to avoid dependency on Engine methods
             
             # Calculate Unrealized PnL
-            if current_trade.side == "LONG_S1_SHORT_S2":
-                pnl_alt1 = current_trade.size_alt1 * (prices[spread_pair.alt1] - current_trade.entry_price_alt1)
-                pnl_alt2 = -current_trade.size_alt2 * (prices[spread_pair.alt2] - current_trade.entry_price_alt2)
-            else:
-                pnl_alt1 = -current_trade.size_alt1 * (prices[spread_pair.alt1] - current_trade.entry_price_alt1)
-                pnl_alt2 = current_trade.size_alt2 * (prices[spread_pair.alt2] - current_trade.entry_price_alt2)
+            entry_prices = {
+                spread_pair.alt1: current_trade.entry_price_alt1,
+                spread_pair.alt2: current_trade.entry_price_alt2
+            }
+            current_prices = {
+                spread_pair.alt1: prices[spread_pair.alt1],
+                spread_pair.alt2: prices[spread_pair.alt2]
+            }
+            quantities = {
+                spread_pair.alt1: current_trade.size_alt1,
+                spread_pair.alt2: current_trade.size_alt2
+            }
             
-            unrealized_pnl = pnl_alt1 + pnl_alt2
+            unrealized_pnl = strategy.calculate_pnl(entry_prices, current_prices, quantities, current_trade.side)
             
             position_value = config.trading.capital_per_leg * 2
             stop_loss_threshold = -position_value * config.risk_management.stop_loss_pct
@@ -714,14 +738,20 @@ def process_backtest_chunk(
         current_trade.exit_price_alt2 = alt2_prices[-1]
         
         # Recalculate PnL
-        if current_trade.side == "LONG_S1_SHORT_S2":
-            pnl_alt1 = current_trade.size_alt1 * (current_trade.exit_price_alt1 - current_trade.entry_price_alt1)
-            pnl_alt2 = -current_trade.size_alt2 * (current_trade.exit_price_alt2 - current_trade.entry_price_alt2)
-        else:
-            pnl_alt1 = -current_trade.size_alt1 * (current_trade.exit_price_alt1 - current_trade.entry_price_alt1)
-            pnl_alt2 = current_trade.size_alt2 * (current_trade.exit_price_alt2 - current_trade.entry_price_alt2)
-            
-        current_trade.pnl = pnl_alt1 + pnl_alt2
+        entry_prices = {
+            spread_pair.alt1: current_trade.entry_price_alt1,
+            spread_pair.alt2: current_trade.entry_price_alt2
+        }
+        exit_prices = {
+            spread_pair.alt1: current_trade.exit_price_alt1,
+            spread_pair.alt2: current_trade.exit_price_alt2
+        }
+        quantities = {
+            spread_pair.alt1: current_trade.size_alt1,
+            spread_pair.alt2: current_trade.size_alt2
+        }
+        
+        current_trade.pnl = strategy.calculate_pnl(entry_prices, exit_prices, quantities, current_trade.side)
         current_trade.status = "CLOSED"
         trades.append(current_trade)
         

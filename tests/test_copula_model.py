@@ -23,7 +23,8 @@ class TestSpreadCalculation:
         btc_prices = np.array([100.0, 101.0, 102.0, 103.0, 104.0])
         alt_prices = np.array([10.0, 10.1, 10.2, 10.3, 10.4])
 
-        spread, beta = calculate_spread(btc_prices, alt_prices)
+        # calculate_spread(target, reference) where target=ALT, reference=BTC
+        spread, beta = calculate_spread(alt_prices, btc_prices)
 
         # Check that beta is positive
         assert beta > 0
@@ -31,8 +32,8 @@ class TestSpreadCalculation:
         # Check spread length matches input
         assert len(spread) == len(btc_prices)
 
-        # Verify relationship: spread = BTC - beta * ALT
-        expected_spread = btc_prices - beta * alt_prices
+        # Verify relationship: spread = ALT - beta * BTC (corrected formula)
+        expected_spread = alt_prices - beta * btc_prices
         np.testing.assert_array_almost_equal(spread, expected_spread)
 
     def test_calculate_spread_perfect_correlation(self):
@@ -41,6 +42,7 @@ class TestSpreadCalculation:
         alt_prices = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
         btc_prices = 10.0 * alt_prices
 
+        # calculate_spread(target=ALT, reference=BTC)
         spread, beta = calculate_spread(btc_prices, alt_prices)
 
         # Beta should be approximately 10
@@ -226,12 +228,13 @@ class TestCopulaModel:
 
         assert "ETHUSDT" in positions
         assert "BNBUSDT" in positions
-        # S1 = BTC - β1*ALT1. To LONG S1, we need S1 to go up.
-        # Since β1 is positive, we need ALT1 to go DOWN relative to BTC. So we SELL ALT1.
-        assert positions["ETHUSDT"][0] == "SELL"
-        # S2 = BTC - β2*ALT2. To SHORT S2, we need S2 to go down.
-        # Since β2 is positive, we need ALT2 to go UP relative to BTC. So we BUY ALT2.
-        assert positions["BNBUSDT"][0] == "BUY"
+        # LONG S1 SHORT S2 = BUY ALT1, SELL ALT2 (corrected logic)
+        # S1 = ALT1 - β1*BTC. To LONG S1, we need S1 to go UP.
+        # So we BUY ALT1.
+        # S2 = ALT2 - β2*BTC. To SHORT S2, we need S2 to go DOWN.
+        # So we SELL ALT2.
+        assert positions["ETHUSDT"][0] == "BUY"
+        assert positions["BNBUSDT"][0] == "SELL"
         assert positions["ETHUSDT"][1] == 10000
         assert positions["BNBUSDT"][1] == 10000
 
@@ -241,9 +244,9 @@ class TestCopulaModel:
 
         positions = model.get_position_quantities("SHORT_S1_LONG_S2", capital_per_leg=10000)
 
-        # Inverse of above
-        assert positions["ETHUSDT"][0] == "BUY"
-        assert positions["BNBUSDT"][0] == "SELL"
+        # SHORT S1 LONG S2 = SELL ALT1, BUY ALT2 (corrected logic)
+        assert positions["ETHUSDT"][0] == "SELL"
+        assert positions["BNBUSDT"][0] == "BUY"
 
     def test_get_position_quantities_close(self, mock_spread_pair):
         """Test position quantities for CLOSE signal."""
