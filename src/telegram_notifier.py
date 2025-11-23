@@ -24,7 +24,6 @@ class TelegramNotifier:
         self.chat_id = chat_id
         self.enabled = enabled
         self.api_url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-        self.last_notification_time = None  # Track last notification to prevent duplicates
 
         if self.enabled and self.bot_token and self.chat_id:
             logger.info(f"Telegram notifier initialized for chat_id: {self.chat_id}")
@@ -53,16 +52,8 @@ class TelegramNotifier:
             return
 
         try:
-            # Prevent duplicate notifications within 10 seconds
-            import time
-            current_time = time.time()
-            if self.last_notification_time and (current_time - self.last_notification_time) < 10:
-                logger.warning("Skipping duplicate notification (within 10s cooldown)")
-                return
-                
             message = self._format_trading_update(positions, prices, signal, total_pnl, signal_data)
             self._send_message(message)
-            self.last_notification_time = current_time
         except Exception as e:
             logger.error(f"Error sending Telegram notification: {e}")
 
