@@ -5,8 +5,17 @@ Main script to run backtests.
 import argparse
 import sys
 import os
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 import pandas as pd
+import multiprocessing
+
+# Set start method to 'spawn' for macOS compatibility and to avoid SQLite locking issues
+# This must be called before any other multiprocessing code
+try:
+    multiprocessing.set_start_method('spawn', force=True)
+except RuntimeError:
+    pass  # Already set
+
 try:
     import matplotlib.pyplot as plt
     HAS_MATPLOTLIB = True
@@ -22,11 +31,11 @@ from src.logger import setup_logger
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Run Backtest")
-    parser.add_argument("--start", type=str, required=True, help="Start date (YYYY-MM-DD)")
-    parser.add_argument("--end", type=str, required=True, help="End date (YYYY-MM-DD)")
+    parser.add_argument("--start", type=str, required=True, help="Start month (YYYY-MM)")
+    parser.add_argument("--end", type=str, required=True, help="End month (YYYY-MM)")
     parser.add_argument("--output", type=str, default="backtest_results", help="Output directory")
-    parser.add_argument("--initial-capital", type=float, default=10000.0, help="Initial capital (default: 10000)")
-    parser.add_argument("--parallel", action="store_true", help="Run backtest in parallel (optimized)")
+    parser.add_argument("--initial-capital", type=float, default=10000.0, help="Initial capital")
+    parser.add_argument("--parallel", action="store_true", help="Run in parallel mode")
     return parser.parse_args()
 
 def main():
@@ -38,6 +47,24 @@ def main():
     # Setup logger
     logger = setup_logger("backtest", f"{args.output}/backtest.log")
     
+    # Parse YYYY-MM
+    try:
+        start_date = datetime.strptime(args.start, "%Y-%m").replace(tzinfo=timezone.utc)
+        # End date should be the LAST day of the end month
+        end_dt_start = datetime.strptime(args.end, "%Y-%m").replace(tzinfo=timezone.utc)
+        # Calculate next month first day, then subtract 1 second
+        if end_dt_start.month == 12:
+            next_month = end_dt_start.replace(year=end_dt_start.year + 1, month=1)
+        else:
+            next_month = end_dt_start.replace(month=end_dt_start.month + 1)
+        end_date = next_month - timedelta(seconds=1)
+        
+        logger.info(f"Backtest Range: {start_date} to {end_date}")
+        
+    except ValueError:
+        logger.error("Invalid date format. Please use YYYY-MM")
+        sys.exit(1) # Exit if date format is invalid
+    
     # Load config
     config = get_config()
     
@@ -46,24 +73,36 @@ def main():
     config.binance.testnet = False
     
     # Initialize components with LIVE client (no API keys needed for historical data)
-    binance_client = BinanceClient(
-        api_key="",  # Not needed for historical data
-        api_secret="",  # Not needed for historical data
-        testnet=False  # Use LIVE historical data
-    )
+    # Initialize Binance Client for DATA FETCHING (Live Data)
+    # We use Live client even for backtesting to get real historical market data.
+    # Testnet data is often static or low quality.
+    # No keys needed for public data.
+    client = BinanceClient(api_key=None, api_secret=None, testnet=False)
     
-    data_manager = DataManager(
-        db_path="data/market_data.db",
-        binance_client=binance_client
-    )
+    # Initialize Data Manager
+    dm = DataManager(db_path="data/backtest_cache.db", binance_client=client)
     
-    from datetime import timezone
-    start_date = datetime.strptime(args.start, "%Y-%m-%d").replace(tzinfo=timezone.utc)
-    end_date = datetime.strptime(args.end, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+
+
     
-    # Run Engine
+    # Pre-fetch data for all symbols using Binance Vision (S3)
+    # This avoids API rate limits and ensures high quality data
+    logger.info("Seeding database from Binance Vision...")
+    symbols = ['BTCUSDT'] + config.trading.altcoins
+    # Ensure unique
+    symbols = list(set(symbols))
+    
+    # Use the write-enabled DM for seeding
+    dm.seed_from_vision(symbols, start_date, end_date)
+    
+    # Create a READ-ONLY DataManager for the engine (workers)
+    # This prevents workers from hitting the API and getting IP banned
+    # We pass client=None so it strictly uses DB
+    dm_read_only = DataManager(db_path="data/backtest_cache.db", binance_client=None)
+    
+    # Run Engine with Read-Only DM
     engine = BacktestEngine(
-        data_manager=data_manager,
+        data_manager=dm_read_only,
         config=config,
         start_date=start_date,
         end_date=end_date,
@@ -126,7 +165,8 @@ def main():
                 "short_asset": short_side,
                 "pnl_long": round(pnl_long, 4),
                 "pnl_short": round(pnl_short, 4),
-                "total_pnl": round(trade.pnl, 4)
+                "total_pnl": round(trade.pnl, 4),
+                "duration": str(trade.exit_time - trade.entry_time) if trade.exit_time else "OPEN"
             })
             
         trades_df = pd.DataFrame(trades_data)

@@ -106,7 +106,7 @@ def load_config() -> Config:
     binance_config = BinanceConfig(
         api_key=api_key,
         api_secret=api_secret,
-        use_testnet=os.getenv("USE_TESTNET", "true").lower() == "true",
+        use_testnet=os.getenv("USE_TESTNET", "false").lower() == "true",
     )
 
     # Trading configuration

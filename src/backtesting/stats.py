@@ -36,9 +36,14 @@ def calculate_stats(equity_curve: pd.DataFrame, trades: list = None) -> Dict:
     else:
         cagr = 0
         
-    # Volatility (Annualized)
-    # Assuming 5-minute data (288 periods per day)
-    volatility = equity_curve["returns"].std() * np.sqrt(288 * 365)
+    # Resample to Daily for Standard Metrics (Sharpe, Sortino, Volatility)
+    # This avoids noise from high-frequency (5m) data and aligns with industry standards.
+    equity_curve['timestamp'] = pd.to_datetime(equity_curve['timestamp'])
+    daily_equity = equity_curve.set_index('timestamp')['equity'].resample('D').last().dropna()
+    daily_returns = daily_equity.pct_change().fillna(0)
+    
+    # Volatility (Annualized from Daily)
+    volatility = daily_returns.std() * np.sqrt(365)
     
     # Sharpe Ratio (Risk Free Rate = 0)
     if volatility > 0:
@@ -47,14 +52,14 @@ def calculate_stats(equity_curve: pd.DataFrame, trades: list = None) -> Dict:
         sharpe = 0
         
     # Sortino Ratio
-    downside_returns = equity_curve["returns"][equity_curve["returns"] < 0]
-    downside_vol = downside_returns.std() * np.sqrt(288 * 365)
+    downside_returns = daily_returns[daily_returns < 0]
+    downside_vol = downside_returns.std() * np.sqrt(365)
     if downside_vol > 0:
         sortino = cagr / downside_vol
     else:
         sortino = 0
         
-    # Max Drawdown
+    # Max Drawdown (Keep high resolution for accuracy)
     equity_curve["peak"] = equity_curve["equity"].cummax()
     equity_curve["drawdown"] = (equity_curve["equity"] - equity_curve["peak"]) / equity_curve["peak"]
     max_drawdown = equity_curve["drawdown"].min()

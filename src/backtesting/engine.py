@@ -3,8 +3,10 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta, timezone
-from typing import Dict, List, Optional, Tuple
-from dataclasses import dataclass
+from typing import List, Dict, Optional, Tuple
+from dataclasses import dataclass, replace
+
+from src.backtesting.data_manager import DataManager
 
 from src.binance_client import BinanceClient
 from src.formation import FormationManager
@@ -119,16 +121,9 @@ class BacktestEngine:
         """Run the backtest simulation."""
         logger.info(f"Starting backtest from {self.start_date} to {self.end_date}")
         
-        # STEP 1: PRE-FETCH ALL DATA (avoiding thousands of small API calls)
-        all_symbols = ['BTCUSDT'] + self.config.trading.altcoins
-        logger.info(f"Pre-fetching data for {len(all_symbols)} symbols...")
-        
-        self.dm.prefetch_all_data(
-            symbols=all_symbols,
-            start=self.start_date - timedelta(days=self.config.trading.formation_days),
-            end=self.end_date,
-            interval="5m"
-        )
+        # STEP 1: PRE-FETCH ALL DATA (Handled by orchestrator/backtest.py)
+        # self.dm.prefetch_all_data(...) -> DEPRECATED
+        logger.info("Starting simulation (Data should be pre-seeded)...")
         
         logger.info("All data cached! Starting simulation...")
         
@@ -185,20 +180,70 @@ class BacktestEngine:
         logger.info("Backtest complete")
 
 
-    def _run_formation(self, current_time: datetime):
-        """Run formation phase at current_time."""
-        logger.info(f"[{current_time}] Running Formation Phase...")
+    def _run_formation(self, timestamp: datetime):
+        """
+        Run formation phase: select best pair.
+        """
+        logger.info(f"[{timestamp}] Running Formation Phase...")
         
         # Close existing trade if any
         if self.current_trade:
-            self._close_trade(current_time, reason="FORMATION_RESET")
+            self._close_trade(timestamp, reason="FORMATION_RESET")
             
-        # Run formation with historical end time
+        # Define formation window
+        start_date = timestamp - timedelta(days=self.config.trading.formation_days)
+        end_date = timestamp
+        
+        # 1. Fetch data for all candidates
+        candidates = self.config.trading.altcoins
+        valid_candidates = []
+        
+        # DATA QUALITY CHECK: Filter out pairs with bad data in formation period
+        for coin in candidates:
+            try:
+                df = self.dm.get_data_with_quality(coin, start_date, end_date)
+                if df.empty:
+                    logger.warning(f"Skipping {coin}: No data for formation")
+                    continue
+                    
+                # Check for invalid rows
+                # We assume 'is_valid' column exists from get_data_with_quality
+                if 'is_valid' in df.columns:
+                    invalid_count = (~df['is_valid']).sum()
+                    if invalid_count > 0:
+                        logger.warning(f"Skipping {coin}: Found {invalid_count} invalid candles in formation period")
+                        continue
+                    
+                valid_candidates.append(coin)
+            except Exception as e:
+                logger.error(f"Error checking QC for {coin}: {e}")
+                
+        if len(valid_candidates) < 2:
+            logger.warning("Not enough valid candidates for formation")
+            self.current_pair = None
+            self.strategy = None
+            return
+
+        # Create a temporary config with filtered altcoins
+        temp_config = self.config
+        from dataclasses import replace
+        new_trading = replace(temp_config.trading, altcoins=valid_candidates)
+        temp_config = replace(temp_config, trading=new_trading)
+        
+        # Initialize Formation with filtered config
+        # Note: We use self.mock_client if available, or self.dm.client
+        # But FormationManager takes binance_client.
+        # We should use the same client as __init__ used.
+        formation = FormationManager(
+            binance_client=self.mock_client,
+            altcoins=valid_candidates,
+            formation_days=temp_config.trading.formation_days,
+            volatility_jump_threshold=temp_config.risk_management.volatility_jump_threshold,
+            volatility_match_factor=temp_config.risk_management.volatility_match_factor,
+        )
+        
         try:
-            spread_pair = self.formation_manager.run_formation(
-                end_time=current_time,
-                output_dir=self.output_dir
-            )
+            spread_pair = formation.run_formation(end_time=timestamp)
             
             if spread_pair:
                 self.current_pair = spread_pair
@@ -208,16 +253,14 @@ class BacktestEngine:
                     exit_threshold=self.config.trading.exit_threshold,
                     capital_per_leg=self.config.trading.capital_per_leg
                 )
-                logger.debug(
-                    f"Selected pair: {spread_pair.alt1} - {spread_pair.alt2} "
-                    f"(tau={spread_pair.tau:.4f}, rho={spread_pair.rho:.4f})"
-                )
+                logger.info(f"Selected pair: {spread_pair.alt1}-{spread_pair.alt2} with |τ|={spread_pair.tau:.4f}")
             else:
-                logger.warning("Formation failed - no suitable pairs found")
+                logger.info("No suitable pair found.")
                 self.current_pair = None
                 self.strategy = None
+                
         except Exception as e:
-            logger.error(f"Formation error: {e}")
+            logger.error(f"Formation failed: {e}")
             self.current_pair = None
             self.strategy = None
 
@@ -307,41 +350,75 @@ class BacktestEngine:
         })
 
     def _get_current_prices(self, timestamp: datetime) -> Dict[str, float]:
-        """Get prices for all active assets at timestamp."""
-        if not self.current_pair:
-            return {}
-        
+        """
+        Get prices for all symbols at a specific timestamp.
+        STRICT MODE: 
+        1. Target the candle that JUST COMPLETED (Open Time = timestamp - 5m)
+        2. Require EXACT timestamp match (no stale data)
+        3. No lookahead (do not use candle opening at timestamp)
+        4. QUALITY CHECK: Reject invalid candles (static/gaps)
+        """
         symbols = ['BTCUSDT', self.current_pair.alt1, self.current_pair.alt2]
         prices = {}
         
+        # We want the candle that closed at 'timestamp'.
+        # Since timestamps are Open Times, we want the candle with Open Time = timestamp - 5m
+        target_open_time = timestamp - timedelta(minutes=5)
+        
         for symbol in symbols:
             try:
-                # Request exact timestamp only to avoid triggering "missing tail" fetches
-                # The DataManager handles single-point lookups efficiently from cache
-                df = self.dm.get_data(symbol, timestamp, timestamp)
+                # Fetch exactly the candle we need WITH QUALITY FLAGS
+                # Use get_data_with_quality from DM
+                df = self.dm.get_data_with_quality(
+                    symbol,
+                    target_open_time,
+                    target_open_time
+                )
                 
                 if df.empty:
-                    # If exact match fails, try a small window (e.g. 1 minute back)
-                    # This handles potential slight timestamp misalignments
-                    df = self.dm.get_data(symbol, timestamp - timedelta(minutes=1), timestamp)
-                
-                if df.empty:
-                    logger.warning(f"No data for {symbol} at {timestamp}")
+                    # Try fetching from API if missing in DB (handled by DM, but double check)
+                    # If still empty, it's a gap
+                    logger.warning(f"No data for {symbol} at {timestamp} (Target Open: {target_open_time})")
                     return {}
                 
-                # Get close price at timestamp (or closest previous)
-                # Sort by timestamp desc to get latest
-                df = df.sort_values('timestamp', ascending=False)
-                prices[symbol] = float(df.iloc[0]['close'])
+                # STRICT: Must have exact match
+                candle = df[df['timestamp'] == target_open_time]
+                if candle.empty:
+                    logger.warning(f"Missing exact candle for {symbol} at {target_open_time}")
+                    return {}
+                
+                latest_candle = candle.iloc[0]
+                
+                # QUALITY CHECK
+                if not latest_candle.get('is_valid', True): # Default True if column missing
+                    issue = latest_candle.get('quality_issue', 'UNKNOWN')
+                    logger.warning(f"Invalid data for {symbol} at {timestamp}: {issue}")
+                    return {} # Treat as missing data
+                
+                # STRICT: Price must be valid
+                price = float(latest_candle['close'])
+                if pd.isna(price) or price <= 0:
+                    raise ValueError(f"Invalid price for {symbol}: {price}")
+                
+                prices[symbol] = price
+                
             except Exception as e:
-                logger.error(f"Error getting price for {symbol} at {timestamp}: {e}")
+                logger.error(f"Price fetch failed for {symbol} at {timestamp}: {e}")
                 return {}
         
         return prices
     
     
     def _open_trade(self, timestamp: datetime, signal: str, prices: Dict[str, float]):
-        """Open a new trade."""
+        """
+        Open a new trade.
+        STRICT MODE: Validates prices before opening.
+        """
+        # STRICT: Validate all prices are positive
+        for symbol, price in prices.items():
+            if price <= 0 or pd.isna(price):
+                raise ValueError(f"Invalid price for {symbol}: {price}")
+        
         pair_name = f"{self.current_pair.alt1}-{self.current_pair.alt2}"
         
         # Calculate position sizes using strategy
@@ -350,6 +427,10 @@ class BacktestEngine:
         # Extract sizes (quantity)
         alt1_size = target_positions[self.current_pair.alt1][1]
         alt2_size = target_positions[self.current_pair.alt2][1]
+        
+        # STRICT: Validate quantities are positive
+        if alt1_size <= 0 or alt2_size <= 0:
+            raise ValueError(f"Invalid position sizes: alt1={alt1_size}, alt2={alt2_size}")
         
         self.current_trade = Trade(
             entry_time=timestamp,
@@ -369,24 +450,23 @@ class BacktestEngine:
         )
 
     def _close_trade(self, timestamp: datetime, reason: str):
-        """Close current trade and calculate PnL."""
+        """Close the current trade."""
         if not self.current_trade:
             return
         
         # Get exit prices
         prices = self._get_current_prices(timestamp)
         if not prices:
-            logger.warning(f"Cannot close trade - no prices at {timestamp}")
+            logger.error(f"Cannot close trade at {timestamp}: no price data")
             return
         
+        # Update trade with exit info
         self.current_trade.exit_time = timestamp
         self.current_trade.exit_price_alt1 = prices[self.current_pair.alt1]
         self.current_trade.exit_price_alt2 = prices[self.current_pair.alt2]
         
         # Calculate PnL
         pnl = self._calculate_pnl(self.current_trade)
-        self.current_trade.pnl = pnl
-        self.current_trade.status = "CLOSED"
         
         self.equity += pnl
         self.trades.append(self.current_trade)
@@ -444,16 +524,8 @@ class BacktestEngine:
         """Run the backtest simulation in parallel using multiprocessing."""
         logger.info(f"Starting PARALLEL backtest from {self.start_date} to {self.end_date}")
         
-        # STEP 1: PRE-FETCH ALL DATA
-        all_symbols = ['BTCUSDT'] + self.config.trading.altcoins
-        logger.info(f"Pre-fetching data for {len(all_symbols)} symbols...")
-        
-        self.dm.prefetch_all_data(
-            symbols=all_symbols,
-            start=self.start_date - timedelta(days=self.config.trading.formation_days),
-            end=self.end_date,
-            interval="5m"
-        )
+        # STEP 1: PRE-FETCH ALL DATA (Handled by orchestrator/backtest.py)
+        logger.info("Starting parallel simulation (Data should be pre-seeded)...")
         logger.info("All data cached! Starting parallel simulation...")
 
         # STEP 2: PREPARE CHUNKS
@@ -558,11 +630,11 @@ def process_backtest_chunk(
     Process a single backtest chunk (formation period) in a separate process.
     """
     # Re-initialize dependencies in the worker process
-    # 1. DataManager
+    # 1. DataManager (READ-ONLY to avoid DB locking issues)
     # We need a BinanceClient for DataManager, even if we only read from DB
     # We can use a mock or real one.
     client = BinanceClient(api_key, api_secret)
-    dm = DataManager(db_path, client)
+    dm = DataManager(db_path, client, read_only=True)
     
     # Mock client for FormationManager to use DM
     class MockBinanceClient:
