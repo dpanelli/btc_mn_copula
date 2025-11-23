@@ -163,8 +163,8 @@ class DataManager:
             df = pd.read_sql_query(query, conn, params=(symbol, start_ts, end_ts))
             
         if not df.empty:
-            # Convert timestamp to datetime
-            df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
+            # Convert timestamp to datetime and localize to UTC
+            df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms").dt.tz_localize('UTC')
         return df
 
     def _save_to_db(self, symbol: str, df: pd.DataFrame):

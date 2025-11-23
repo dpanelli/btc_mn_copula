@@ -778,8 +778,12 @@ class TradingManager:
             entry_time_str = state.get('trade_entry_time')
             
             if entry_time_str:
-                # Parse ISO format timestamp
-                return datetime.fromisoformat(entry_time_str.replace('Z', '+00:00'))
+                # Parse ISO format timestamp and ensure it's UTC-aware
+                entry_dt = datetime.fromisoformat(entry_time_str.replace('Z', '+00:00'))
+                # Ensure timezone is set to UTC if naive
+                if entry_dt.tzinfo is None:
+                    entry_dt = entry_dt.replace(tzinfo=timezone.utc)
+                return entry_dt
             
         except Exception as e:
             logger.error(f"Error getting trade entry time: {e}", exc_info=True)

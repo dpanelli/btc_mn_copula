@@ -297,6 +297,101 @@ class CopulaModel:
         self.spread_pair = spread_pair
         self.entry_threshold = entry_threshold
         self.exit_threshold = exit_threshold
+        
+        # Pre-sort spread data for fast vectorized uniform transformation
+        self.sorted_spread1 = np.sort(spread_pair.spread1_data)
+        self.sorted_spread2 = np.sort(spread_pair.spread2_data)
+
+    def generate_signals_vectorized(
+        self, btc_prices: np.ndarray, alt1_prices: np.ndarray, alt2_prices: np.ndarray
+    ) -> pd.DataFrame:
+        """
+        Generate trading signals for arrays of prices (vectorized).
+
+        Args:
+            btc_prices: Array of BTC prices
+            alt1_prices: Array of first altcoin prices
+            alt2_prices: Array of second altcoin prices
+
+        Returns:
+            DataFrame with columns: signal, h_1_given_2, h_2_given_1
+        """
+        # Calculate spreads
+        s1 = btc_prices - self.spread_pair.beta1 * alt1_prices
+        s2 = btc_prices - self.spread_pair.beta2 * alt2_prices
+
+        # Transform to uniform margins
+        u1 = self._transform_to_uniform_vectorized(s1, self.sorted_spread1)
+        u2 = self._transform_to_uniform_vectorized(s2, self.sorted_spread2)
+
+        # Calculate conditional probabilities
+        # We need to vectorize gaussian_copula_conditional_cdf as well
+        # It uses stats.norm.ppf/cdf which are already vectorized for numpy arrays
+        h_1_given_2 = gaussian_copula_conditional_cdf(
+            u1, u2, self.spread_pair.rho, condition_on_2=True
+        )
+        h_2_given_1 = gaussian_copula_conditional_cdf(
+            u1, u2, self.spread_pair.rho, condition_on_2=False
+        )
+
+        # Initialize signals array
+        signals = np.full(len(btc_prices), "HOLD", dtype=object)
+
+        # Entry signals
+        # LONG S1, SHORT S2
+        long_s1_mask = (
+            (h_1_given_2 <= 0.5 - self.entry_threshold) & 
+            (h_2_given_1 >= 0.5 + self.entry_threshold)
+        )
+        signals[long_s1_mask] = "LONG_S1_SHORT_S2"
+
+        # SHORT S1, LONG S2
+        short_s1_mask = (
+            (h_1_given_2 >= 0.5 + self.entry_threshold) & 
+            (h_2_given_1 <= 0.5 - self.entry_threshold)
+        )
+        signals[short_s1_mask] = "SHORT_S1_LONG_S2"
+
+        # Exit signals
+        # (0.45 < h < 0.55) OR (0.45 < h < 0.55)
+        close_mask = (
+            ((h_1_given_2 > 0.45) & (h_1_given_2 < 0.55)) |
+            ((h_2_given_1 > 0.45) & (h_2_given_1 < 0.55))
+        )
+        # Only overwrite HOLD, don't overwrite Entry signals (though they shouldn't overlap)
+        # Actually, if it qualifies for both, Entry usually takes precedence or it's ambiguous.
+        # But mathematically, if h is near 0.5, it can't be <= 0.4 or >= 0.6 (assuming threshold 0.1)
+        # So no overlap if threshold >= 0.05.
+        signals[close_mask] = "CLOSE"
+
+        return pd.DataFrame({
+            "signal": signals,
+            "h_1_given_2": h_1_given_2,
+            "h_2_given_1": h_2_given_1
+        })
+
+    def _transform_to_uniform_vectorized(
+        self, values: np.ndarray, sorted_historical_data: np.ndarray
+    ) -> np.ndarray:
+        """
+        Transform values to uniform quantiles using empirical CDF (vectorized).
+
+        Args:
+            values: Array of current values to transform
+            sorted_historical_data: Pre-sorted historical data
+
+        Returns:
+            Array of uniform quantiles in [0,1]
+        """
+        # Use searchsorted to find rank
+        # side='right' gives count of elements <= value
+        ranks = np.searchsorted(sorted_historical_data, values, side='right')
+        n = len(sorted_historical_data)
+
+        # Transform to uniform
+        uniforms = (ranks + 0.5) / (n + 1)
+
+        return np.clip(uniforms, 1e-6, 1 - 1e-6)
 
     def generate_signal(
         self, btc_price: float, alt1_price: float, alt2_price: float

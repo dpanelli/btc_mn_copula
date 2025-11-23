@@ -1,14 +1,12 @@
-"""
-Backtest Engine.
-Simulates the strategy over historical data with rolling formation periods.
-"""
-
+import multiprocessing
+from concurrent.futures import ProcessPoolExecutor, as_completed
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass
 
+from src.binance_client import BinanceClient
 from src.formation import FormationManager
 from src.copula_model import CopulaModel, SpreadPair
 from src.logger import get_logger
@@ -128,6 +126,12 @@ class BacktestEngine:
                 self._process_cycle(current_time)
             
             # 3. Update Equity
+            self._update_equity(current_time)
+
+        # Force-close any remaining open positions at end of backtest
+        if self.current_trade:
+            logger.info(f"Force-closing open position at end of backtest: {self.current_trade.pair}")
+            self._close_trade(current_time, reason="END_OF_BACKTEST")
             self._update_equity(current_time)
 
         logger.info("Backtest complete")
@@ -363,3 +367,296 @@ class BacktestEngine:
         )
         
         return self._calculate_pnl(temp_trade)
+
+
+    def run_parallel(self):
+        """Run the backtest simulation in parallel using multiprocessing."""
+        logger.info(f"Starting PARALLEL backtest from {self.start_date} to {self.end_date}")
+        
+        # STEP 1: PRE-FETCH ALL DATA
+        all_symbols = ['BTCUSDT'] + self.config.trading.altcoins
+        logger.info(f"Pre-fetching data for {len(all_symbols)} symbols...")
+        
+        self.dm.prefetch_all_data(
+            symbols=all_symbols,
+            start=self.start_date - timedelta(days=self.config.trading.formation_days),
+            end=self.end_date,
+            interval="5m"
+        )
+        logger.info("All data cached! Starting parallel simulation...")
+
+        # STEP 2: PREPARE CHUNKS
+        # We split time into 7-day chunks (formation periods)
+        chunks = []
+        current_chunk_start = self.start_date
+        
+        while current_chunk_start < self.end_date:
+            current_chunk_end = min(current_chunk_start + timedelta(days=7), self.end_date)
+            chunks.append((current_chunk_start, current_chunk_end))
+            current_chunk_start = current_chunk_end
+            
+        logger.info(f"Split backtest into {len(chunks)} chunks")
+
+        # STEP 3: EXECUTE IN PARALLEL
+        # We need to pass configuration and DB path to workers
+        # Note: We can't pass the DataManager instance itself as it contains a sqlite connection
+        db_path = self.dm.db_path
+        api_key = self.config.binance.api_key
+        api_secret = self.config.binance.api_secret
+        
+        all_trades = []
+        
+        # Use fewer workers than CPU count to avoid DB contention if any
+        max_workers = max(1, multiprocessing.cpu_count() - 1)
+        
+        with ProcessPoolExecutor(max_workers=max_workers) as executor:
+            future_to_chunk = {
+                executor.submit(
+                    process_backtest_chunk,
+                    start,
+                    end,
+                    self.config,
+                    db_path,
+                    api_key,
+                    api_secret,
+                    is_final_chunk=(end == self.end_date)  # Only force-close on final chunk
+                ): (start, end) for start, end in chunks
+            }
+            
+            for future in as_completed(future_to_chunk):
+                chunk_start, chunk_end = future_to_chunk[future]
+                try:
+                    chunk_trades, chunk_pnl_series = future.result()
+                    all_trades.extend(chunk_trades)
+                    logger.info(f"Chunk {chunk_start} -> {chunk_end} completed: {len(chunk_trades)} trades")
+                except Exception as e:
+                    logger.error(f"Chunk {chunk_start} -> {chunk_end} failed: {e}", exc_info=True)
+
+        # STEP 4: RECONSTRUCT EQUITY CURVE
+        # Sort trades by entry time
+        self.trades = sorted(all_trades, key=lambda t: t.entry_time)
+        
+        # Reconstruct equity curve sequentially
+        # This is fast enough since we just iterate trades/time, not processing signals
+        self.equity = self.capital
+        self.equity_curve = []
+        
+        # We can just use the trades to build the equity curve points
+        # Or we can use the detailed PnL series returned by chunks if we want high res
+        # For now, let's just rebuild a simple equity curve based on realized PnL
+        # To get a nice curve, we'd need the chunk_pnl_series.
+        # Let's assume we want high resolution equity curve.
+        
+        # But wait, stitching PnL series is tricky because equity compounds (if we reinvest)
+        # or adds up (if fixed capital).
+        # Current logic uses fixed capital per leg, so PnL is additive.
+        
+        # Let's just set the final trades list. The standard reporting tools
+        # usually reconstruct the curve from the trade list anyway.
+        # But for our internal self.equity_curve, we can just append the trade results.
+        
+        current_equity = self.capital
+        for trade in self.trades:
+            current_equity += trade.pnl
+            self.equity_curve.append({
+                "timestamp": trade.exit_time,
+                "equity": current_equity,
+                "cash": current_equity, # Simplified
+                "unrealized_pnl": 0
+            })
+            
+        self.equity = current_equity
+        logger.info(f"Parallel backtest complete. Final Equity: ${self.equity:.2f}")
+
+
+def process_backtest_chunk(
+    start_time: datetime,
+    end_time: datetime,
+    config: object,
+    db_path: str,
+    api_key: str,
+    api_secret: str,
+    is_final_chunk: bool = False
+) -> Tuple[List[Trade], List[Dict]]:
+    """
+    Process a single backtest chunk (formation period) in a separate process.
+    """
+    # Re-initialize dependencies in the worker process
+    # 1. DataManager
+    # We need a BinanceClient for DataManager, even if we only read from DB
+    # We can use a mock or real one.
+    client = BinanceClient(api_key, api_secret)
+    dm = DataManager(db_path, client)
+    
+    # Mock client for FormationManager to use DM
+    class MockBinanceClient:
+        def __init__(self, dm):
+            self.dm = dm
+        def get_historical_klines(self, symbol, interval, start_str, end_str):
+            return self.dm.get_data(symbol, start_str, end_str, interval)
+        def futures_exchange_info(self):
+            return {} # Not needed for formation
+            
+    mock_client = MockBinanceClient(dm)
+    
+    # 2. FormationManager
+    fm = FormationManager(
+        binance_client=mock_client,
+        altcoins=config.trading.altcoins,
+        formation_days=config.trading.formation_days,
+        volatility_jump_threshold=config.risk_management.volatility_jump_threshold,
+        volatility_match_factor=config.risk_management.volatility_match_factor,
+    )
+    
+    # 3. Run Formation
+    # Formation uses data BEFORE start_time
+    spread_pair = fm.run_formation(end_time=start_time)
+    
+    if not spread_pair:
+        return [], []
+        
+    # 4. Initialize Copula Model
+    model = CopulaModel(
+        spread_pair,
+        entry_threshold=config.trading.entry_threshold,
+        exit_threshold=config.trading.exit_threshold
+    )
+    
+    # 5. Fetch Data for the Chunk
+    # We need BTC, Alt1, Alt2 for the whole chunk
+    # Fetching all at once is much faster
+    btc_df = dm.get_data("BTCUSDT", start_time, end_time)
+    alt1_df = dm.get_data(spread_pair.alt1, start_time, end_time)
+    alt2_df = dm.get_data(spread_pair.alt2, start_time, end_time)
+    
+    # Align data
+    # Inner join on timestamp
+    df = pd.merge(btc_df[['timestamp', 'close']], alt1_df[['timestamp', 'close']], on='timestamp', suffixes=('_btc', '_alt1'))
+    df = pd.merge(df, alt2_df[['timestamp', 'close']], on='timestamp')
+    # After first merge: timestamp, close_btc, close_alt1
+    # After second merge: timestamp, close_btc, close_alt1, close
+    df = df.rename(columns={'close_btc': 'btc', 'close_alt1': 'alt1', 'close': 'alt2'})
+    df = df.sort_values('timestamp')
+    
+    if df.empty:
+        return [], []
+        
+    timestamps = df['timestamp'].values
+    btc_prices = df['btc'].values
+    alt1_prices = df['alt1'].values
+    alt2_prices = df['alt2'].values
+    
+    # 6. Vectorized Signal Generation
+    signals_df = model.generate_signals_vectorized(btc_prices, alt1_prices, alt2_prices)
+    signals = signals_df['signal'].values
+    
+    # 7. Simulate Trades
+    trades = []
+    current_trade = None
+    
+    # Iterate through aligned data
+    # We still need to iterate to handle trade state, but we don't calculate signals
+    for i in range(len(timestamps)):
+        ts = pd.to_datetime(timestamps[i]).tz_localize('UTC') if pd.to_datetime(timestamps[i]).tz is None else pd.to_datetime(timestamps[i])
+        signal = signals[i]
+        
+        # Current prices
+        prices = {
+            "BTCUSDT": btc_prices[i],
+            spread_pair.alt1: alt1_prices[i],
+            spread_pair.alt2: alt2_prices[i]
+        }
+        
+        # Risk Management & Exit
+        if current_trade:
+            # Check Stop Loss
+            # We need to calculate PnL. 
+            # Re-implementing simplified PnL calc here to avoid dependency on Engine methods
+            
+            # Calculate Unrealized PnL
+            if current_trade.side == "LONG_S1_SHORT_S2":
+                pnl_alt1 = -current_trade.size_alt1 * (prices[spread_pair.alt1] - current_trade.entry_price_alt1)
+                pnl_alt2 = current_trade.size_alt2 * (prices[spread_pair.alt2] - current_trade.entry_price_alt2)
+            else:
+                pnl_alt1 = current_trade.size_alt1 * (prices[spread_pair.alt1] - current_trade.entry_price_alt1)
+                pnl_alt2 = -current_trade.size_alt2 * (prices[spread_pair.alt2] - current_trade.entry_price_alt2)
+            
+            unrealized_pnl = pnl_alt1 + pnl_alt2
+            
+            position_value = config.trading.capital_per_leg * 2
+            stop_loss_threshold = -position_value * config.risk_management.stop_loss_pct
+            
+            # Check Stop Loss
+            if unrealized_pnl < stop_loss_threshold:
+                current_trade.exit_time = ts
+                current_trade.exit_price_alt1 = prices[spread_pair.alt1]
+                current_trade.exit_price_alt2 = prices[spread_pair.alt2]
+                current_trade.pnl = unrealized_pnl
+                current_trade.status = "CLOSED"
+                trades.append(current_trade)
+                current_trade = None
+                continue
+                
+            # Check Time Exit
+            duration_hours = (ts - current_trade.entry_time).total_seconds() / 3600
+            if duration_hours > config.risk_management.max_trade_duration_hours:
+                current_trade.exit_time = ts
+                current_trade.exit_price_alt1 = prices[spread_pair.alt1]
+                current_trade.exit_price_alt2 = prices[spread_pair.alt2]
+                current_trade.pnl = unrealized_pnl
+                current_trade.status = "CLOSED"
+                trades.append(current_trade)
+                current_trade = None
+                continue
+                
+            # Check Signal Exit
+            if signal == "CLOSE":
+                current_trade.exit_time = ts
+                current_trade.exit_price_alt1 = prices[spread_pair.alt1]
+                current_trade.exit_price_alt2 = prices[spread_pair.alt2]
+                current_trade.pnl = unrealized_pnl
+                current_trade.status = "CLOSED"
+                trades.append(current_trade)
+                current_trade = None
+                continue
+                
+        # Entry
+        elif signal in ['LONG_S1_SHORT_S2', 'SHORT_S1_LONG_S2']:
+            # Open new trade
+            pair_name = f"{spread_pair.alt1}-{spread_pair.alt2}"
+            alt1_size = config.trading.capital_per_leg / prices[spread_pair.alt1]
+            alt2_size = config.trading.capital_per_leg / prices[spread_pair.alt2]
+            
+            current_trade = Trade(
+                entry_time=ts,
+                exit_time=None,
+                pair=pair_name,
+                side=signal,
+                size_alt1=alt1_size,
+                size_alt2=alt2_size,
+                entry_price_alt1=prices[spread_pair.alt1],
+                entry_price_alt2=prices[spread_pair.alt2]
+            )
+            
+    # Force close at end of chunk (formation boundary)
+    # Each chunk ends at a formation time, so any open trade must be closed
+    if current_trade:
+        # We close at the last available price
+        current_trade.exit_time = pd.to_datetime(timestamps[-1]).tz_localize('UTC') if pd.to_datetime(timestamps[-1]).tz is None else pd.to_datetime(timestamps[-1])
+        current_trade.exit_price_alt1 = alt1_prices[-1]
+        current_trade.exit_price_alt2 = alt2_prices[-1]
+        
+        # Recalculate PnL
+        if current_trade.side == "LONG_S1_SHORT_S2":
+            pnl_alt1 = -current_trade.size_alt1 * (current_trade.exit_price_alt1 - current_trade.entry_price_alt1)
+            pnl_alt2 = current_trade.size_alt2 * (current_trade.exit_price_alt2 - current_trade.entry_price_alt2)
+        else:
+            pnl_alt1 = current_trade.size_alt1 * (current_trade.exit_price_alt1 - current_trade.entry_price_alt1)
+            pnl_alt2 = -current_trade.size_alt2 * (current_trade.exit_price_alt2 - current_trade.entry_price_alt2)
+            
+        current_trade.pnl = pnl_alt1 + pnl_alt2
+        current_trade.status = "CLOSED"
+        trades.append(current_trade)
+        
+    return trades, [] # We skip detailed PnL series for now to save bandwidth
+

@@ -26,6 +26,7 @@ def parse_args():
     parser.add_argument("--end", type=str, required=True, help="End date (YYYY-MM-DD)")
     parser.add_argument("--output", type=str, default="backtest_results", help="Output directory")
     parser.add_argument("--initial-capital", type=float, default=10000.0, help="Initial capital (default: 10000)")
+    parser.add_argument("--parallel", action="store_true", help="Run backtest in parallel (optimized)")
     return parser.parse_args()
 
 def main():
@@ -56,8 +57,9 @@ def main():
         binance_client=binance_client
     )
     
-    start_date = datetime.strptime(args.start, "%Y-%m-%d")
-    end_date = datetime.strptime(args.end, "%Y-%m-%d")
+    from datetime import timezone
+    start_date = datetime.strptime(args.start, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    end_date = datetime.strptime(args.end, "%Y-%m-%d").replace(tzinfo=timezone.utc)
     
     # Run Engine
     engine = BacktestEngine(
@@ -68,7 +70,10 @@ def main():
         initial_capital=args.initial_capital
     )
     
-    engine.run()
+    if args.parallel:
+        engine.run_parallel()
+    else:
+        engine.run()
     
     # Generate Report
     equity_df = pd.DataFrame(engine.equity_curve)

@@ -156,7 +156,7 @@ class BinanceClient:
             df = df[["timestamp", "open", "high", "low", "close", "volume"]]
 
             # Convert types
-            df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
+            df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms").dt.tz_localize('UTC')
             for col in ["open", "high", "low", "close", "volume"]:
                 df[col] = pd.to_numeric(df[col], errors="coerce")
 
