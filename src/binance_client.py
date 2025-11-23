@@ -230,6 +230,25 @@ class BinanceClient:
         """
         try:
             return self.client.futures_exchange_info()
-        except Exception as e:
+        except BinanceAPIException as e:
             logger.error(f"Error fetching exchange info: {e}")
+            raise
+
+    def set_leverage(self, symbol: str, leverage: int):
+        """
+        Set leverage for a futures symbol.
+
+        Args:
+            symbol: Trading pair symbol (e.g., 'ETHUSDT')
+            leverage: Leverage value (1-125)
+
+        Returns:
+            API response
+        """
+        try:
+            response = self.client.futures_change_leverage(symbol=symbol, leverage=leverage)
+            logger.info(f"Set leverage for {symbol} to {leverage}x")
+            return response
+        except BinanceAPIException as e:
+            logger.error(f"Error setting leverage for {symbol}: {e}")
             raise
