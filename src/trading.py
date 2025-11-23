@@ -414,9 +414,11 @@ class TradingManager:
                 # REVISION: To minimize changes and risk, let's convert back to capital for the existing method
                 # OR better, update this loop to use quantity directly.
                 
-                position_size = quantity # It's already a float amount of asset
+                # Round quantity to exchange precision (LOT_SIZE step size)
+                # This is critical - Binance will reject orders with invalid precision
+                position_size = self.binance_client.round_quantity_to_precision(symbol, quantity)
                 
-                # Place order
+                # Place order with properly rounded quantity
                 order = self.binance_client.place_market_order(symbol, side, position_size)
 
                 results[symbol] = {
