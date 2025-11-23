@@ -547,8 +547,6 @@ class BacktestEngine:
         # We need to pass configuration and DB path to workers
         # Note: We can't pass the DataManager instance itself as it contains a sqlite connection
         db_path = self.dm.db_path
-        api_key = self.config.binance.api_key
-        api_secret = self.config.binance.api_secret
         
         all_trades = []
         
@@ -563,8 +561,6 @@ class BacktestEngine:
                     end,
                     self.config,
                     db_path,
-                    api_key,
-                    api_secret,
                     is_final_chunk=(end == self.end_date),  # Only force-close on final chunk
                     output_dir=self.output_dir
                 ): (start, end) for start, end in chunks
@@ -621,20 +617,19 @@ def process_backtest_chunk(
     end_time: datetime,
     config: object,
     db_path: str,
-    api_key: str,
-    api_secret: str,
     is_final_chunk: bool = False,
     output_dir: Optional[str] = None
 ) -> Tuple[List[Trade], List[Dict]]:
     """
     Process a single backtest chunk (formation period) in a separate process.
+    
+    IMPORTANT: This function runs in a worker process and must NOT use the Binance API.
+    All data must be pre-loaded in the SQLite database.
     """
     # Re-initialize dependencies in the worker process
     # 1. DataManager (READ-ONLY to avoid DB locking issues)
-    # We need a BinanceClient for DataManager, even if we only read from DB
-    # We can use a mock or real one.
-    client = BinanceClient(api_key, api_secret)
-    dm = DataManager(db_path, client, read_only=True)
+    # IMPORTANT: Pass None for binance_client to ensure NO API calls during backtest
+    dm = DataManager(db_path, binance_client=None, read_only=True)
     
     # Mock client for FormationManager to use DM
     class MockBinanceClient:
