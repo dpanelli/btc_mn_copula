@@ -387,3 +387,22 @@ class BinanceClient:
         except Exception as e:
             logger.error(f"Error calculating position size for {symbol}: {e}")
             raise
+
+    def futures_position_information(self, symbol: Optional[str] = None):
+        """
+        Get position information for all or specific symbol.
+        
+        Args:
+            symbol: Optional symbol to filter. If None, returns all positions.
+            
+        Returns:
+            List of position dicts
+        """
+        try:
+            if symbol:
+                return self.client.futures_position_information(symbol=symbol)
+            else:
+                return self.client.futures_position_information()
+        except Exception as e:
+            logger.error(f"Error fetching position information: {e}")
+            raise

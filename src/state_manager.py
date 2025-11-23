@@ -194,6 +194,24 @@ class StateManager:
             logger.error(f"Error getting state summary: {e}")
             return {"status": "error", "message": str(e)}
 
+    def load_state(self) -> Optional[Dict]:
+        """
+        Load raw state dictionary from state file.
+        
+        Returns:
+            State dict, or None if no state exists
+        """
+        try:
+            if not self.state_file.exists():
+                return None
+                
+            with open(self.state_file, "r") as f:
+                return json.load(f)
+                
+        except Exception as e:
+            logger.error(f"Error loading state: {e}")
+            return None
+
     def clear_state(self) -> None:
         """Clear state file (useful for testing or reset)."""
         try:
