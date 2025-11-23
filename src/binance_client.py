@@ -234,21 +234,190 @@ class BinanceClient:
             logger.error(f"Error fetching exchange info: {e}")
             raise
 
-    def set_leverage(self, symbol: str, leverage: int):
+    def set_leverage(self, symbol: str, leverage: int) -> None:
         """
-        Set leverage for a futures symbol.
+        Set leverage for a symbol.
 
         Args:
-            symbol: Trading pair symbol (e.g., 'ETHUSDT')
-            leverage: Leverage value (1-125)
-
-        Returns:
-            API response
+            symbol: Trading pair symbol
+            leverage: Leverage multiplier (1-125)
         """
         try:
-            response = self.client.futures_change_leverage(symbol=symbol, leverage=leverage)
-            logger.info(f"Set leverage for {symbol} to {leverage}x")
-            return response
+            result = self.client.futures_change_leverage(symbol=symbol, leverage=leverage)
+            logger.info(f"Set leverage for {symbol} to {leverage}x: {result}")
         except BinanceAPIException as e:
             logger.error(f"Error setting leverage for {symbol}: {e}")
+            raise
+
+    def place_market_order(
+        self, symbol: str, side: str, quantity: float, reduce_only: bool = False
+    ) -> Dict:
+        """
+        Place a market order.
+
+        Args:
+            symbol: Trading pair symbol
+            side: Order side ('BUY' or 'SELL')
+            quantity: Order quantity in base asset
+            reduce_only: If True, order can only reduce position (prevents flipping), default: False
+
+        Returns:
+            Order response dict
+        """
+        try:
+            from binance.enums import ORDER_TYPE_MARKET
+            
+            logger.info(
+                f"Placing market {side} order for {symbol}: {quantity} "
+                f"(reduceOnly={reduce_only})"
+            )
+
+            order_params = {
+                "symbol": symbol,
+                "side": side,
+                "type": ORDER_TYPE_MARKET,
+                "quantity": quantity,
+            }
+
+            # Add reduceOnly if requested (string value required by Binance API)
+            if reduce_only:
+                order_params["reduceOnly"] = "true"
+
+            order = self.client.futures_create_order(**order_params)
+
+            logger.info(f"Order placed successfully: {order}")
+            return order
+
+        except BinanceAPIException as e:
+            logger.error(f"Error placing market order for {symbol}: {e}")
+            raise
+
+    def get_position(self, symbol: str) -> Optional[Dict]:
+        """
+        Get current position for a symbol.
+
+        Args:
+            symbol: Trading pair symbol
+
+        Returns:
+            Position dict with keys: symbol, positionAmt, entryPrice, unRealizedProfit
+            Returns None if no position exists
+        """
+        try:
+            positions = self.client.futures_position_information(symbol=symbol)
+            for pos in positions:
+                if float(pos["positionAmt"]) != 0:
+                    logger.debug(f"Position for {symbol}: {pos}")
+                    return {
+                        "symbol": pos["symbol"],
+                        "position_amt": float(pos["positionAmt"]),
+                        "entry_price": float(pos["entryPrice"]),
+                        "unrealized_pnl": float(pos["unRealizedProfit"]),
+                        "leverage": int(pos.get("leverage", 1)),  # Default to 1x if not available
+                    }
+            logger.debug(f"No position for {symbol}")
+            return None
+
+        except BinanceAPIException as e:
+            logger.error(f"Error fetching position for {symbol}: {e}")
+            raise
+
+    def close_position(self, symbol: str) -> Optional[Dict]:
+        """
+        Close an open position by placing an opposing market order with reduceOnly=True.
+
+        Uses reduceOnly flag to ensure the order can ONLY reduce the position,
+        preventing accidental position flips due to timing, rounding, or state issues.
+
+        Args:
+            symbol: Trading pair symbol
+
+        Returns:
+            Order response dict, or None if no position to close
+        """
+        try:
+            from binance.enums import SIDE_SELL, SIDE_BUY
+            
+            position = self.get_position(symbol)
+            if position is None:
+                logger.info(f"No position to close for {symbol}")
+                return None
+
+            position_amt = position["position_amt"]
+            if position_amt == 0:
+                logger.info(f"Position already flat for {symbol}")
+                return None
+
+            # Determine side to close position (opposite of current)
+            side = SIDE_SELL if position_amt > 0 else SIDE_BUY
+            quantity = abs(position_amt)
+
+            logger.info(f"Closing position for {symbol}: {side} {quantity} (reduceOnly=True)")
+            return self.place_market_order(symbol, side, quantity, reduce_only=True)
+
+        except BinanceAPIException as e:
+            logger.error(f"Error closing position for {symbol}: {e}")
+            raise
+
+    def get_account_balance(self) -> float:
+        """
+        Get USDT balance from Futures account.
+
+        Returns:
+            Available USDT balance
+        """
+        try:
+            account = self.client.futures_account()
+            for asset in account["assets"]:
+                if asset["asset"] == "USDT":
+                    balance = float(asset["availableBalance"])
+                    logger.debug(f"USDT balance: {balance}")
+                    return balance
+            return 0.0
+        except BinanceAPIException as e:
+            logger.error(f"Error fetching account balance: {e}")
+            raise
+
+    def calculate_position_size(
+        self, symbol: str, capital_usdt: float, leverage: int
+    ) -> float:
+        """
+        Calculate position size in base currency given capital and leverage.
+
+        Args:
+            symbol: Trading pair symbol
+            capital_usdt: Capital to allocate in USDT
+            leverage: Leverage multiplier
+
+        Returns:
+            Position size in base currency (rounded to symbol precision)
+        """
+        try:
+            price = self.get_current_price(symbol)
+            # Position value = capital * leverage
+            position_value = capital_usdt * leverage
+            # Position size in base currency
+            position_size = position_value / price
+
+            # Get symbol info for precision
+            exchange_info = self.client.futures_exchange_info()
+            for s in exchange_info["symbols"]:
+                if s["symbol"] == symbol:
+                    # Get quantity precision
+                    for f in s["filters"]:
+                        if f["filterType"] == "LOT_SIZE":
+                            step_size = float(f["stepSize"])
+                            # Round to step size
+                            position_size = round(position_size / step_size) * step_size
+                            break
+                    break
+
+            logger.debug(
+                f"Position size for {symbol}: {position_size} "
+                f"(capital={capital_usdt}, leverage={leverage}, price={price})"
+            )
+            return position_size
+
+        except BinanceAPIException as e:
+            logger.error(f"Error calculating position size for {symbol}: {e}")
             raise
