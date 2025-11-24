@@ -136,7 +136,7 @@ def run_formation_phase():
         logger.info("=" * 100)
 
         # Close any existing positions before formation
-        if trading_manager.copula_model is not None:
+        if trading_manager.strategy is not None:
             logger.info("Closing existing positions before formation...")
             trading_manager._close_positions()
             trading_manager.current_position = None

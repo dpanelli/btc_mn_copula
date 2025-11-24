@@ -39,3 +39,4 @@ htmlcov/
 results/
 data/
 bt_*/
+backtest_results/
