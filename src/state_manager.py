@@ -212,6 +212,20 @@ class StateManager:
             logger.error(f"Error loading state: {e}")
             return None
 
+    def save_state(self, state: Dict) -> None:
+        """
+        Save raw state dictionary to state file.
+        
+        Args:
+            state: State dictionary to save
+        """
+        try:
+            with open(self.state_file, "w") as f:
+                json.dump(state, f, indent=2)
+        except Exception as e:
+            logger.error(f"Error saving state: {e}")
+            raise
+
     def clear_state(self) -> None:
         """Clear state file (useful for testing or reset)."""
         try:
