@@ -116,9 +116,9 @@ class BinanceClient:
 
                 # Update start time for next batch: use last candle's close_time + 1ms
                 last_close_time_ms = int(klines[-1][6])
-                current_start = datetime.fromtimestamp(last_close_time_ms / 1000) + timedelta(
-                    milliseconds=1
-                )
+                current_start = datetime.fromtimestamp(
+                    last_close_time_ms / 1000, tz=timezone.utc
+                ) + timedelta(milliseconds=1)
 
                 # Safety check: prevent infinite loop
                 if current_start >= end_time:
