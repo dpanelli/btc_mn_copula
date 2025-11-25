@@ -18,7 +18,6 @@ This bot implements a **market-neutral** trading strategy that:
 - **Risk Management**: Position sizing, leverage control, and stop-loss
 - **State Persistence**: Saves copula parameters and trading state
 - **Comprehensive Logging**: Detailed logs for monitoring and debugging
-- **Testnet Support**: Safe testing on Binance Futures Testnet
 
 ## Strategy Details
 
@@ -26,7 +25,7 @@ This bot implements a **market-neutral** trading strategy that:
 
 1. Fetch 21 days of historical 5-minute OHLCV data
 2. Calculate spreads for all altcoin pairs: `S_i(t) = BTC(t) - beta_i * ALT_i(t)`
-3. Test cointegration using Augmented Dickey-Fuller (ADF) test
+3. Test cointegration using both Engle-Granger (ADF) and Kapetanios-Shin-Snell (KSS) tests
 4. Rank cointegrated pairs by Kendall's Tau correlation
 5. Select top pair and fit Gaussian copula
 
@@ -95,12 +94,11 @@ cd btc_mn_copulas
 2. **Install dependencies**:
 ```bash
 # Using uv (recommended)
-uv sync
+# 1. Install uv: https://docs.astral.sh/uv/getting-started/installation/
+#    curl -LsSf https://astral.sh/uv/install.sh | sh
 
-# Or using pip
-pip install -e .
-# Or with dev dependencies:
-pip install -e ".[dev]"
+# 2. Sync dependencies
+uv sync
 ```
 
 3. **Configure environment**:
@@ -152,6 +150,26 @@ python main.py
 # Set USE_TESTNET=false in .env
 python main.py
 ```
+
+### Backtesting
+
+You can run backtests without any API keys! The backtester automatically downloads high-quality **5-minute** data from Binance Vision (public S3 bucket).
+
+```bash
+# Basic run (defaults to Q1 2025 if not specified, but arguments are required)
+python backtest.py --start 2025-01 --end 2025-03
+
+# Custom date range and capital
+python backtest.py --start 2024-01 --end 2024-06 --initial-capital 50000
+
+# Run in parallel mode (faster for long periods)
+python backtest.py --start 2024-01 --end 2024-12 --parallel
+```
+
+- **No API Keys Needed**: Uses public data.
+- **Data Source**: Binance Vision (official historical data).
+- **Interval**: 5-minute candles.
+- **Output**: Generates a tearsheet report in `backtest_results/tearsheet/report.html`.
 
 The bot will:
 1. Initialize all components
@@ -305,18 +323,4 @@ The current implementation uses Gaussian copula. To add Student-t, Clayton, or o
 - **Copula Theory**: Nelsen, R. B. (2006). "An Introduction to Copulas"
 - **Cointegration**: Engle, R. F., & Granger, C. W. (1987). "Co-integration and error correction"
 
-## License
 
-This project is for educational and research purposes only. Use at your own risk.
-
-## Disclaimer
-
-**This software is provided "as is" without warranty of any kind**. The authors are not responsible for any financial losses incurred from using this bot. Cryptocurrency trading involves substantial risk of loss. Always do your own research and consult with financial advisors before trading.
-
-## Support
-
-For issues, questions, or contributions, please open an issue on GitHub.
-
----
-
-**Built with**: Python 3.12+ | Binance API | SciPy | NumPy | pandas | APScheduler
