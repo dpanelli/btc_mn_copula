@@ -481,8 +481,8 @@ class CopulaModel:
         # Paper uses: (0.45 < h < 0.55) OR (0.45 < h < 0.55)
         # Exit if EITHER spread has converged to fair value
         elif (
-            (0.45 < h_1_given_2 < 0.55)
-            or (0.45 < h_2_given_1 < 0.55)
+            (0.5 - self.exit_threshold < h_1_given_2 < 0.5 + self.exit_threshold)
+            or (0.5 - self.exit_threshold < h_2_given_1 < 0.5 + self.exit_threshold)
         ):
             logger.info(
                 f"EXIT SIGNAL: CLOSE positions "
