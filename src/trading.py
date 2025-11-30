@@ -183,11 +183,11 @@ class TradingManager:
                     "timestamp": datetime.now(timezone.utc).isoformat(),
                 }
             
-            # 2. Time-based exit check
+            # 2. Time-based exit check (skip if disabled with -1)
             entry_time = self._get_trade_entry_time()
-            if entry_time:
+            if entry_time and self.max_trade_duration_hours > 0:
                 duration_hours = (datetime.now(timezone.utc) - entry_time).total_seconds() / 3600
-                
+
                 if duration_hours > self.max_trade_duration_hours:
                     logger.warning(
                         f"⏰ TIME-BASED EXIT: Trade duration {duration_hours:.1f}h > "

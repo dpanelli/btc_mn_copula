@@ -293,9 +293,9 @@ class BacktestEngine:
                 self._close_trade(current_time, "STOP_LOSS")
                 return
             
-            # 2. Time-based exit check
+            # 2. Time-based exit check (skip if disabled with -1)
             trade_duration_hours = (current_time - self.current_trade.entry_time).total_seconds() / 3600
-            if trade_duration_hours > self.config.risk_management.max_trade_duration_hours:
+            if self.config.risk_management.max_trade_duration_hours > 0 and trade_duration_hours > self.config.risk_management.max_trade_duration_hours:
                 logger.warning(
                     f"[{current_time}] TIME-BASED EXIT: Trade duration {trade_duration_hours:.1f}h "
                     f"> {self.config.risk_management.max_trade_duration_hours}h"
@@ -755,9 +755,9 @@ def process_backtest_chunk(
                 current_trade = None
                 continue
                 
-            # Check Time Exit
+            # Check Time Exit (skip if disabled with -1)
             duration_hours = (ts - current_trade.entry_time).total_seconds() / 3600
-            if duration_hours > config.risk_management.max_trade_duration_hours:
+            if config.risk_management.max_trade_duration_hours > 0 and duration_hours > config.risk_management.max_trade_duration_hours:
                 current_trade.exit_time = ts
                 current_trade.exit_price_alt1 = prices[spread_pair.alt1]
                 current_trade.exit_price_alt2 = prices[spread_pair.alt2]
