@@ -235,42 +235,13 @@ class TradingManager:
 
             logger.info(f"Signal: {signal}")
 
-            # Send Telegram notification
-            if self.telegram_notifier:
-                try:
-                    positions = self.get_current_positions()
-
-                    # Calculate total PnL
-                    total_pnl = sum(
-                        pos.get("unrealized_pnl", 0)
-                        for pos in positions.values()
-                        if "error" not in pos
-                    )
-
-                    # Prepare price data
-
-                    price_data = {
-                        "btc": btc_price,
-                        "alt1": alt1_price,
-                        "alt2": alt2_price,
-                        "alt1_symbol": self.strategy.spread_pair.alt1,
-                        "alt2_symbol": self.strategy.spread_pair.alt2,
-                    }
-
-                    self.telegram_notifier.send_trading_update(
-                        positions=positions,
-                        prices=price_data,
-                        signal=signal,
-                        total_pnl=total_pnl,
-                        signal_data=signal_data,
-                    )
-                except Exception as e:
-                    logger.error(f"Error sending Telegram notification: {e}")
+            # Initialize result variable
+            result = None
 
             # Check if we need to act on the signal
             if signal == "HOLD":
                 logger.info("Signal is HOLD - no action taken")
-                return {
+                result = {
                     "status": "success",
                     "signal": signal,
                     "action": "none",
@@ -278,13 +249,14 @@ class TradingManager:
                 }
 
             # Execute trades based on signal
-            if signal == "CLOSE":
+            elif signal == "CLOSE":
                 result = self._close_positions()
                 # Verify positions are closed by querying Binance
                 if not self._has_open_positions():
                     self.current_position = None
                 else:
                     logger.warning("Positions not fully closed after CLOSE signal")
+
             elif signal in ["LONG_S1_SHORT_S2", "SHORT_S1_LONG_S2"]:
                 # Query Binance for actual positions (avoid using local state)
                 has_positions = self._has_open_positions()
@@ -298,7 +270,7 @@ class TradingManager:
                             f"Position {signal} already open (verified with Binance), "
                             f"ignoring duplicate entry signal"
                         )
-                        return {
+                        result = {
                             "status": "success",
                             "signal": signal,
                             "action": "none",
@@ -318,21 +290,58 @@ class TradingManager:
                         else:
                             logger.warning("Failed to close positions before entering new trade")
 
-                # Only execute entry if no position exists
-                result = self._execute_entry_signal(signal)
-                # Verify entry succeeded by querying Binance
-                if result["status"] == "success":
-                    if self._has_open_positions():
-                        self.current_position = signal
-                    else:
-                        logger.error("Entry reported success but no positions detected on Binance")
-                        self.current_position = None
+                # Only execute entry if no position exists (and not already set result above)
+                if result is None:
+                    result = self._execute_entry_signal(signal)
+                    # Verify entry succeeded by querying Binance
+                    if result["status"] == "success":
+                        if self._has_open_positions():
+                            self.current_position = signal
+                        else:
+                            logger.error("Entry reported success but no positions detected on Binance")
+                            self.current_position = None
             else:
                 logger.warning(f"Unknown signal: {signal}")
-                return {
+                result = {
                     "status": "error",
                     "message": f"Unknown signal: {signal}",
                 }
+
+            # Send Telegram notification AFTER trade execution
+            # This ensures the notification reflects the actual state after signal processing
+            if self.telegram_notifier:
+                try:
+                    positions = self.get_current_positions()
+
+                    # Calculate total PnL
+                    total_pnl = sum(
+                        pos.get("unrealized_pnl", 0)
+                        for pos in positions.values()
+                        if "error" not in pos
+                    )
+
+                    price_data = {
+                        "btc": btc_price,
+                        "alt1": alt1_price,
+                        "alt2": alt2_price,
+                        "alt1_symbol": self.strategy.spread_pair.alt1,
+                        "alt2_symbol": self.strategy.spread_pair.alt2,
+                    }
+
+                    # Use "EXECUTED" signal name if entry was successful, otherwise show original signal
+                    display_signal = signal
+                    if result and result.get("status") == "error":
+                        display_signal = f"{signal} (FAILED)"
+
+                    self.telegram_notifier.send_trading_update(
+                        positions=positions,
+                        prices=price_data,
+                        signal=display_signal,
+                        total_pnl=total_pnl,
+                        signal_data=signal_data,
+                    )
+                except Exception as e:
+                    logger.error(f"Error sending Telegram notification: {e}")
 
             return result
 
@@ -363,19 +372,22 @@ class TradingManager:
         positions = self.strategy.get_target_positions(signal, prices)
 
         # Check if we have enough balance for all legs
-        required_capital = sum(cap for _, cap in positions.values())
+        # Required margin = (2 * capital_per_leg) / leverage
+        # positions contains (side, quantity), not dollar amounts
+        total_notional = 2 * self.capital_per_leg  # $100 per leg × 2 legs = $200
+        required_margin = total_notional / self.max_leverage  # $200 / 4 = $50
         try:
             available_balance = self.binance_client.get_account_balance()
-            if available_balance < required_capital:
+            if available_balance < required_margin:
                 logger.error(
-                    f"Insufficient balance for entry: Available={available_balance:.2f}, "
-                    f"Required={required_capital:.2f}"
+                    f"Insufficient balance for entry: Available=${available_balance:.2f}, "
+                    f"Required margin=${required_margin:.2f} (notional=${total_notional:.2f}, leverage={self.max_leverage}x)"
                 )
                 return {
                     "status": "error",
                     "message": "Insufficient balance",
                     "available": available_balance,
-                    "required": required_capital,
+                    "required": required_margin,
                 }
         except Exception as e:
             logger.error(f"Error checking balance: {e}")
