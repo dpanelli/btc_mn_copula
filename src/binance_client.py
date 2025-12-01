@@ -410,11 +410,11 @@ class BinanceClient:
     def round_quantity_to_precision(self, symbol: str, quantity: float) -> float:
         """
         Round quantity to symbol's LOT_SIZE precision.
-        
+
         Args:
             symbol: Trading pair symbol
             quantity: Raw quantity to round
-            
+
         Returns:
             Quantity rounded to exchange precision
         """
@@ -425,18 +425,27 @@ class BinanceClient:
                     for f in s["filters"]:
                         if f["filterType"] == "LOT_SIZE":
                             step_size = float(f["stepSize"])
-                            # Round to step size
+                            # Calculate decimal places from step_size
+                            # e.g., step_size=0.1 -> 1 decimal, step_size=0.01 -> 2 decimals
+                            if step_size >= 1:
+                                decimals = 0
+                            else:
+                                decimals = len(str(step_size).rstrip('0').split('.')[-1])
+
+                            # Round to step size, then round again to eliminate floating point errors
                             rounded = round(quantity / step_size) * step_size
+                            rounded = round(rounded, decimals)
+
                             logger.debug(
-                                f"Rounded {symbol} quantity: {quantity:.8f} -> {rounded:.8f} "
-                                f"(step_size={step_size})"
+                                f"Rounded {symbol} quantity: {quantity:.8f} -> {rounded} "
+                                f"(step_size={step_size}, decimals={decimals})"
                             )
                             return rounded
-            
+
             # If no LOT_SIZE filter found, return original
             logger.warning(f"No LOT_SIZE filter found for {symbol}, using raw quantity")
             return quantity
-            
+
         except Exception as e:
             logger.error(f"Error rounding quantity for {symbol}: {e}")
             return quantity
