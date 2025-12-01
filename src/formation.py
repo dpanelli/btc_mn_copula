@@ -186,13 +186,13 @@ class FormationManager:
                 # Create spread pair
                 pair = SpreadPair(alt1, alt2)
 
-                # Calculate spread 1: ALT1 - β1*BTC
-                spread1, beta1 = calculate_spread(target_prices=prices_alt1, reference_prices=prices_btc)
+                # Calculate spread 1: S1 = BTC - β1*ALT1 (per paper)
+                spread1, beta1 = calculate_spread(alt_prices=prices_alt1, btc_prices=prices_btc)
                 pair.beta1 = beta1
                 pair.spread1_data = spread1
 
-                # Calculate spread 2: ALT2 - β2*BTC
-                spread2, beta2 = calculate_spread(target_prices=prices_alt2, reference_prices=prices_btc)
+                # Calculate spread 2: S2 = BTC - β2*ALT2 (per paper)
+                spread2, beta2 = calculate_spread(alt_prices=prices_alt2, btc_prices=prices_btc)
                 pair.beta2 = beta2
                 pair.spread2_data = spread2
 
@@ -262,7 +262,12 @@ class FormationManager:
             logger.info(f"  {i}. {pair} - |τ|={tau:.4f}")
 
         best_pair, best_tau = cointegrated_pairs[0]
-        logger.info(f"\nSelected pair: {best_pair} with |τ|={best_tau:.4f}")
+        logger.info(f"\n{'='*60}")
+        logger.info(f"SELECTED PAIR:")
+        logger.info(f"  ALT1: {best_pair.alt1}")
+        logger.info(f"  ALT2: {best_pair.alt2}")
+        logger.info(f"  Kendall's |τ|: {best_tau:.4f}")
+        logger.info(f"{'='*60}")
 
         # Step 6: Fit copula parameters
         logger.info("\nFitting Gaussian copula...")
@@ -279,6 +284,10 @@ class FormationManager:
 
         logger.info("=" * 80)
         logger.info("FORMATION PHASE COMPLETED")
+        logger.info(f"  ALT1({best_pair.alt1}): β1={best_pair.beta1:.6f}")
+        logger.info(f"  ALT2({best_pair.alt2}): β2={best_pair.beta2:.6f}")
+        logger.info(f"  Copula ρ={rho:.4f}, Kendall τ={best_pair.tau:.4f}")
+        logger.info(f"  Spread formula: S = BTC - β*ALT (per paper)")
         logger.info("=" * 80)
 
         return best_pair

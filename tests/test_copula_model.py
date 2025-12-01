@@ -23,7 +23,7 @@ class TestSpreadCalculation:
         btc_prices = np.array([100.0, 101.0, 102.0, 103.0, 104.0])
         alt_prices = np.array([10.0, 10.1, 10.2, 10.3, 10.4])
 
-        # calculate_spread(target, reference) where target=ALT, reference=BTC
+        # calculate_spread(alt_prices, btc_prices) computes S = BTC - β*ALT (per paper)
         spread, beta = calculate_spread(alt_prices, btc_prices)
 
         # Check that beta is positive
@@ -32,8 +32,8 @@ class TestSpreadCalculation:
         # Check spread length matches input
         assert len(spread) == len(btc_prices)
 
-        # Verify relationship: spread = ALT - beta * BTC (corrected formula)
-        expected_spread = alt_prices - beta * btc_prices
+        # Verify relationship: spread = BTC - beta * ALT (per paper formula)
+        expected_spread = btc_prices - beta * alt_prices
         np.testing.assert_array_almost_equal(spread, expected_spread)
 
     def test_calculate_spread_perfect_correlation(self):
@@ -42,13 +42,13 @@ class TestSpreadCalculation:
         alt_prices = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
         btc_prices = 10.0 * alt_prices
 
-        # calculate_spread(target=ALT, reference=BTC)
-        spread, beta = calculate_spread(btc_prices, alt_prices)
+        # calculate_spread regresses BTC = β*ALT, so β ≈ 10
+        spread, beta = calculate_spread(alt_prices, btc_prices)
 
-        # Beta should be approximately 10
+        # Beta should be approximately 10 (BTC/ALT ratio)
         assert abs(beta - 10.0) < 0.01
 
-        # Spread should be close to zero (minus intercept)
+        # Spread should be close to zero (residual from perfect fit)
         assert np.std(spread) < 0.01
 
 

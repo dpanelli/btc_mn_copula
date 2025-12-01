@@ -38,23 +38,24 @@ class SpreadPair:
 
 
 def calculate_spread(
-    target_prices: np.ndarray, reference_prices: np.ndarray
+    alt_prices: np.ndarray, btc_prices: np.ndarray
 ) -> Tuple[np.ndarray, float]:
     """
-    Calculate spread S = Target - β*Reference using OLS regression.
-    Typically: Target=ALT, Reference=BTC.
+    Calculate spread S = BTC - β*ALT using OLS regression (per paper).
+
+    Regression: BTC = β*ALT + α
+    Spread: S = BTC - β*ALT (residual from cointegration relationship)
 
     Args:
-        target_prices: Target asset price series (e.g., ALT)
-        reference_prices: Reference asset price series (e.g., BTC)
+        alt_prices: Altcoin price series
+        btc_prices: BTC price series (reference asset)
 
     Returns:
         Tuple of (spread series, beta coefficient)
     """
-    # OLS regression: Target = β*Reference + α
-    # We use numpy's least squares
-    X = reference_prices.reshape(-1, 1)
-    y = target_prices
+    # OLS regression: BTC = β*ALT + α (per paper)
+    X = alt_prices.reshape(-1, 1)
+    y = btc_prices
 
     # Add intercept
     X_with_intercept = np.column_stack([np.ones(len(X)), X])
@@ -63,8 +64,8 @@ def calculate_spread(
     coeffs, residuals, rank, s = np.linalg.lstsq(X_with_intercept, y, rcond=None)
     alpha, beta = coeffs
 
-    # Calculate spread: S = Target - β*Reference
-    spread = target_prices - beta * reference_prices
+    # Calculate spread: S = BTC - β*ALT (per paper)
+    spread = btc_prices - beta * alt_prices
 
     logger.debug(f"OLS regression: β={beta:.6f}, α={alpha:.6f}")
     return spread, beta
@@ -317,9 +318,9 @@ class CopulaModel:
         Returns:
             DataFrame with columns: signal, h_1_given_2, h_2_given_1
         """
-        # Calculate spreads: S = ALT - β * BTC
-        s1 = alt1_prices - self.spread_pair.beta1 * btc_prices
-        s2 = alt2_prices - self.spread_pair.beta2 * btc_prices
+        # Calculate spreads: S = BTC - β*ALT (per paper)
+        s1 = btc_prices - self.spread_pair.beta1 * alt1_prices
+        s2 = btc_prices - self.spread_pair.beta2 * alt2_prices
 
         # Transform to uniform margins
         u1 = self._transform_to_uniform_vectorized(s1, self.sorted_spread1)
@@ -353,10 +354,10 @@ class CopulaModel:
         )
         signals[short_s1_mask] = "SHORT_S1_LONG_S2"
 
-        # Exit signals
-        # (0.45 < h < 0.55) OR (0.45 < h < 0.55)
+        # Exit signals (per paper: BOTH must converge to fair value)
+        # (0.45 < h_1|2 < 0.55) AND (0.45 < h_2|1 < 0.55)
         close_mask = (
-            ((h_1_given_2 > 0.45) & (h_1_given_2 < 0.55)) |
+            ((h_1_given_2 > 0.45) & (h_1_given_2 < 0.55)) &
             ((h_2_given_1 > 0.45) & (h_2_given_1 < 0.55))
         )
         # Only overwrite HOLD, don't overwrite Entry signals (though they shouldn't overlap)
@@ -414,9 +415,9 @@ class CopulaModel:
                 - distance_1: Distance of h_1_given_2 from 0.5
                 - distance_2: Distance of h_2_given_1 from 0.5
         """
-        # Calculate current spreads: S = ALT - β * BTC
-        s1 = alt1_price - self.spread_pair.beta1 * btc_price
-        s2 = alt2_price - self.spread_pair.beta2 * btc_price
+        # Calculate current spreads: S = BTC - β*ALT (per paper)
+        s1 = btc_price - self.spread_pair.beta1 * alt1_price
+        s2 = btc_price - self.spread_pair.beta2 * alt2_price
 
         # Transform to uniform margins using historical data
         u1 = self._transform_to_uniform(s1, self.spread_pair.spread1_data)
@@ -477,16 +478,15 @@ class CopulaModel:
                 "distance_2": abs(h_2_given_1 - 0.5),
             }
 
-        # Exit signal - CORRECTED PER PAPER  
-        # Paper uses: (0.45 < h < 0.55) OR (0.45 < h < 0.55)
-        # Exit if EITHER spread has converged to fair value
+        # Exit signal - per paper: BOTH spreads must converge to fair value
+        # (0.45 < h_1|2 < 0.55) AND (0.45 < h_2|1 < 0.55)
         elif (
             (0.5 - self.exit_threshold < h_1_given_2 < 0.5 + self.exit_threshold)
-            or (0.5 - self.exit_threshold < h_2_given_1 < 0.5 + self.exit_threshold)
+            and (0.5 - self.exit_threshold < h_2_given_1 < 0.5 + self.exit_threshold)
         ):
             logger.info(
                 f"EXIT SIGNAL: CLOSE positions "
-                f"(h_1|2={h_1_given_2:.4f} or h_2|1={h_2_given_1:.4f} near 0.5)"
+                f"(h_1|2={h_1_given_2:.4f} AND h_2|1={h_2_given_1:.4f} both near 0.5)"
             )
             return {
                 "signal": "CLOSE",

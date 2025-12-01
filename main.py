@@ -157,8 +157,10 @@ def run_formation_phase():
 
         logger.info("=" * 100)
         logger.info("FORMATION PHASE COMPLETED SUCCESSFULLY")
-        logger.info(f"Selected pair: {spread_pair.alt1} - {spread_pair.alt2}")
-        logger.info(f"Parameters: β1={spread_pair.beta1:.6f}, β2={spread_pair.beta2:.6f}, ρ={spread_pair.rho:.4f}")
+        logger.info(f"  ALT1: {spread_pair.alt1} (β1={spread_pair.beta1:.6f})")
+        logger.info(f"  ALT2: {spread_pair.alt2} (β2={spread_pair.beta2:.6f})")
+        logger.info(f"  Copula: ρ={spread_pair.rho:.4f}, τ={spread_pair.tau:.4f}")
+        logger.info(f"  Spread formula: S = BTC - β*ALT")
         logger.info("=" * 100 + "\n")
 
     except Exception as e:
