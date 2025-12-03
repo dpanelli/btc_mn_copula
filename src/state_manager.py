@@ -129,6 +129,34 @@ class StateManager:
         except Exception as e:
             logger.error(f"Error updating position state: {e}")
 
+    def update_cooldown(self, cooldown_until: Optional[datetime]) -> None:
+        """
+        Update cooldown timestamp in state file.
+
+        Args:
+            cooldown_until: Datetime until which trading is paused, or None
+        """
+        try:
+            if not self.state_file.exists():
+                logger.warning("State file doesn't exist, cannot update cooldown")
+                return
+
+            with open(self.state_file, "r") as f:
+                state = json.load(f)
+
+            if cooldown_until:
+                state["cooldown_until"] = cooldown_until.isoformat()
+            else:
+                state["cooldown_until"] = None
+
+            with open(self.state_file, "w") as f:
+                json.dump(state, f, indent=2)
+
+            logger.debug(f"Updated cooldown state to: {state['cooldown_until']}")
+
+        except Exception as e:
+            logger.error(f"Error updating cooldown state: {e}")
+
     def get_current_position(self) -> Optional[str]:
         """
         Get current position from state file.

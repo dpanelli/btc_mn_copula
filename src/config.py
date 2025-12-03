@@ -42,6 +42,7 @@ class RiskManagementConfig:
     max_trade_duration_hours: int  # Maximum trade duration in hours
     volatility_jump_threshold: float  # Max allowed single-day price jump (e.g., 0.30 = 30%)
     volatility_match_factor: float  # Max volatility ratio between pair legs (e.g., 1.3)
+    cooldown_minutes: int = 60  # Cooldown period in minutes after forced exit
 
 
 @dataclass
@@ -156,6 +157,7 @@ def load_config() -> Config:
         max_trade_duration_hours=int(os.getenv("MAX_TRADE_DURATION_HOURS", "48")),
         volatility_jump_threshold=float(os.getenv("VOLATILITY_JUMP_THRESHOLD", "0.30")),
         volatility_match_factor=float(os.getenv("VOLATILITY_MATCH_FACTOR", "1.3")),
+        cooldown_minutes=int(os.getenv("COOLDOWN_MINUTES", "60")),
     )
 
     # State file

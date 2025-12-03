@@ -26,6 +26,7 @@ class TradingManager:
         state_manager: Optional[object] = None,
         stop_loss_pct: float = 0.04,
         max_trade_duration_hours: int = 48,
+        cooldown_minutes: int = 60,
     ):
         """
         Initialize trading manager.
@@ -40,6 +41,7 @@ class TradingManager:
             state_manager: Optional StateManager for crash-resistant state storage
             stop_loss_pct: Stop-loss as % of position value (default 0.04 = 4%)
             max_trade_duration_hours: Maximum trade duration in hours (default 48)
+            cooldown_minutes: Cooldown period in minutes after forced exit (default 60)
         """
         self.binance_client = binance_client
         self.capital_per_leg = capital_per_leg
@@ -50,8 +52,7 @@ class TradingManager:
         self.state_manager = state_manager
         self.stop_loss_pct = stop_loss_pct
         self.max_trade_duration_hours = max_trade_duration_hours
-        self.stop_loss_pct = stop_loss_pct
-        self.max_trade_duration_hours = max_trade_duration_hours
+        self.cooldown_minutes = cooldown_minutes
         self.strategy: Optional[PairsTradingStrategy] = None
         self.current_position: Optional[str] = None  # Track current position state
         self.btc_symbol = "BTCUSDT"
@@ -119,6 +120,31 @@ class TradingManager:
             except Exception as e:
                 logger.error(f"Error checking formation time: {e}")
 
+        # COOLDOWN CHECK: Check if we are in a cooldown period
+        if self.state_manager:
+            try:
+                state = self.state_manager.load_state()
+                cooldown_until_str = state.get('cooldown_until')
+                if cooldown_until_str:
+                    cooldown_dt = datetime.fromisoformat(cooldown_until_str.replace('Z', '+00:00'))
+                    if cooldown_dt.tzinfo is None:
+                        cooldown_dt = cooldown_dt.replace(tzinfo=timezone.utc)
+                    
+                    current_time = datetime.now(timezone.utc)
+                    if current_time < cooldown_dt:
+                        remaining_minutes = (cooldown_dt - current_time).total_seconds() / 60
+                        logger.info(f"❄️ COOLDOWN ACTIVE: Trading paused for {remaining_minutes:.1f} more minutes")
+                        return {
+                            "status": "waiting",
+                            "message": f"Cooldown active: {remaining_minutes:.1f}m remaining"
+                        }
+                    else:
+                        # Cooldown expired, clear it
+                        logger.info("Cooldown expired, resuming trading")
+                        self.state_manager.update_cooldown(None)
+            except Exception as e:
+                logger.error(f"Error checking cooldown: {e}")
+
         # Log current positions and PnL at start of each cycle
         self._log_positions_and_pnl()
         logger.info("")  # Blank line for readability
@@ -171,6 +197,9 @@ class TradingManager:
                 self._close_positions()
                 self._clear_trade_entry()
                 
+                # Activate cooldown
+                self._activate_cooldown()
+                
                 if self.telegram_notifier:
                     self.telegram_notifier.send_message(
                         f"🛑 STOP-LOSS: Closed positions at ${unrealized_pnl:.2f}"
@@ -195,6 +224,9 @@ class TradingManager:
                     )
                     self._close_positions()
                     self._clear_trade_entry()
+                    
+                    # Activate cooldown
+                    self._activate_cooldown()
                     
                     if self.telegram_notifier:
                         self.telegram_notifier.send_message(
@@ -773,6 +805,16 @@ class TradingManager:
 
         except Exception as e:
             logger.error(f"Error logging positions and PnL: {e}", exc_info=True)
+
+    def _activate_cooldown(self) -> None:
+        """Activate cooldown period after forced exit."""
+        if not self.state_manager:
+            return
+            
+        from datetime import timedelta
+        cooldown_until = datetime.now(timezone.utc) + timedelta(minutes=self.cooldown_minutes)
+        self.state_manager.update_cooldown(cooldown_until)
+        logger.info(f"❄️ Cooldown activated until {cooldown_until.isoformat()} ({self.cooldown_minutes} mins)")
 
     # ========================================================================
     # RISK MANAGEMENT METHODS
