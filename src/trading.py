@@ -648,9 +648,14 @@ class TradingManager:
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
 
-    def get_current_positions(self) -> Dict:
+        return positions
+
+    def get_current_positions(self, max_retries: int = 3) -> Dict:
         """
-        Get current position information for both symbols.
+        Get current position information for both symbols with retry logic.
+
+        Args:
+            max_retries: Number of retries for API calls
 
         Returns:
             Dict with position info for each symbol
@@ -659,16 +664,24 @@ class TradingManager:
             return {}
 
         positions = {}
+        import time
+        
         for symbol in [
             self.strategy.spread_pair.alt1,
             self.strategy.spread_pair.alt2,
         ]:
-            try:
-                pos = self.binance_client.get_position(symbol)
-                positions[symbol] = pos if pos else {"position_amt": 0}
-            except Exception as e:
-                logger.error(f"Error fetching position for {symbol}: {e}")
-                positions[symbol] = {"error": str(e)}
+            for attempt in range(max_retries):
+                try:
+                    pos = self.binance_client.get_position(symbol)
+                    positions[symbol] = pos if pos else {"position_amt": 0}
+                    break # Success
+                except Exception as e:
+                    if attempt == max_retries - 1:
+                        logger.error(f"Error fetching position for {symbol} after {max_retries} attempts: {e}")
+                        positions[symbol] = {"error": str(e)}
+                    else:
+                        logger.warning(f"Error fetching position for {symbol} (attempt {attempt+1}/{max_retries}): {e}. Retrying...")
+                        time.sleep(1) # Wait 1s before retry
 
         return positions
 
@@ -721,19 +734,25 @@ class TradingManager:
         - S2 = BTC - β2*ALT2. To LONG S2 (increase it), we need ALT2 to decrease → SELL ALT2
 
         Returns:
-            'LONG_S1_SHORT_S2', 'SHORT_S1_LONG_S2', or None
+            'LONG_S1_SHORT_S2', 'SHORT_S1_LONG_S2', 'INCONSISTENT', or None
+            Returns None if API error occurs (to prevent false INCONSISTENT)
         """
         if self.strategy is None:
             return None
 
         positions = self.get_current_positions()
         
+        # Check for API errors first
+        for symbol, pos_data in positions.items():
+            if "error" in pos_data:
+                logger.error(f"Cannot determine position type due to API error for {symbol}")
+                return None # Return None to indicate unknown state (safe fallback)
+        
         # Convert Binance positions to simple dict {symbol: signed_quantity} for strategy
         strategy_positions = {}
         for symbol, pos_data in positions.items():
-            if "error" not in pos_data:
-                amt = float(pos_data.get("position_amt", 0))
-                strategy_positions[symbol] = amt
+            amt = float(pos_data.get("position_amt", 0))
+            strategy_positions[symbol] = amt
                 
         return self.strategy.get_position_state(strategy_positions)
 
@@ -892,6 +911,9 @@ class TradingManager:
         
         try:
             state = self.state_manager.load_state()
+            if state is None:
+                state = {}
+                
             state['trade_entry_time'] = datetime.now(timezone.utc).isoformat()
             state['trade_entry_capital'] = capital
             self.state_manager.save_state(state)
@@ -908,11 +930,11 @@ class TradingManager:
         
         try:
             state = self.state_manager.load_state()
-            state.pop('trade_entry_time', None)
-            state.pop('trade_entry_capital', None)
-            self.state_manager.save_state(state)
-            
-            logger.info("Cleared trade entry from state")
+            if state:
+                state.pop('trade_entry_time', None)
+                state.pop('trade_entry_capital', None)
+                self.state_manager.save_state(state)
+                logger.info("Cleared trade entry from state")
             
         except Exception as e:
             logger.error(f"Error clearing trade entry: {e}", exc_info=True)
