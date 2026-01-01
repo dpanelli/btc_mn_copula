@@ -267,6 +267,37 @@ class TradingManager:
 
             logger.info(f"Signal: {signal}")
 
+            # POSITION-AWARE EXIT: Check if spread has converged for open positions
+            # The base CLOSE signal requires BOTH h values near 0.5, which is too restrictive.
+            # We add position-aware logic: if we're in a position and the spread we're betting on
+            # has crossed back to fair value (0.5), that's a profitable convergence -> close.
+            if self._has_open_positions() and signal != "CLOSE":
+                current_position = self._get_current_position_type()
+                h_1_given_2 = signal_data.get("h_1_given_2", 0.5)
+                h_2_given_1 = signal_data.get("h_2_given_1", 0.5)
+
+                should_close = False
+                close_reason = ""
+
+                if current_position == "LONG_S1_SHORT_S2":
+                    # We entered when h_1|2 was LOW (<=0.4) betting S1 goes UP
+                    # Exit when h_1|2 crosses back to or above fair value (>=0.5)
+                    if h_1_given_2 >= 0.5:
+                        should_close = True
+                        close_reason = f"Convergence: h_1|2={h_1_given_2:.4f} >= 0.5 (spread 1 reached fair value)"
+
+                elif current_position == "SHORT_S1_LONG_S2":
+                    # We entered when h_1|2 was HIGH (>=0.6) betting S1 goes DOWN
+                    # Exit when h_1|2 crosses back to or below fair value (<=0.5)
+                    if h_1_given_2 <= 0.5:
+                        should_close = True
+                        close_reason = f"Convergence: h_1|2={h_1_given_2:.4f} <= 0.5 (spread 1 reached fair value)"
+
+                if should_close:
+                    logger.info(f"📊 POSITION-AWARE EXIT: {close_reason}")
+                    signal = "CLOSE"
+                    signal_data["close_reason"] = close_reason
+
             # Initialize result variable
             result = None
 
