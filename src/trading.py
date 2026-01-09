@@ -25,6 +25,7 @@ class TradingManager:
         telegram_notifier: Optional[TelegramNotifier] = None,
         state_manager: Optional[object] = None,
         stop_loss_pct: float = 0.04,
+        take_profit_pct: float = 0.10,
         max_trade_duration_hours: int = 48,
         cooldown_minutes: int = 60,
     ):
@@ -40,6 +41,7 @@ class TradingManager:
             telegram_notifier: Optional TelegramNotifier instance for notifications
             state_manager: Optional StateManager for crash-resistant state storage
             stop_loss_pct: Stop-loss as % of position value (default 0.04 = 4%)
+            take_profit_pct: Take-profit as % of position value (default 0.10 = 10%)
             max_trade_duration_hours: Maximum trade duration in hours (default 48)
             cooldown_minutes: Cooldown period in minutes after forced exit (default 60)
         """
@@ -51,6 +53,7 @@ class TradingManager:
         self.telegram_notifier = telegram_notifier
         self.state_manager = state_manager
         self.stop_loss_pct = stop_loss_pct
+        self.take_profit_pct = take_profit_pct
         self.max_trade_duration_hours = max_trade_duration_hours
         self.cooldown_minutes = cooldown_minutes
         self.strategy: Optional[PairsTradingStrategy] = None
@@ -211,8 +214,34 @@ class TradingManager:
                     "threshold": stop_loss_threshold,
                     "timestamp": datetime.now(timezone.utc).isoformat(),
                 }
-            
-            # 2. Time-based exit check (skip if disabled with -1)
+
+            # 2. Take-profit check (percentage-based)
+            take_profit_threshold = entry_capital * self.take_profit_pct
+
+            if unrealized_pnl >= take_profit_threshold:
+                logger.info(
+                    f"💰 TAKE-PROFIT triggered: PnL=${unrealized_pnl:.2f} >= "
+                    f"${take_profit_threshold:.2f} ({self.take_profit_pct:.1%} of ${entry_capital:.2f})"
+                )
+                self._close_positions()
+                self._clear_trade_entry()
+
+                # No cooldown for take-profit - allow immediate re-entry
+
+                if self.telegram_notifier:
+                    self.telegram_notifier.send_message(
+                        f"💰 TAKE-PROFIT: Closed positions at ${unrealized_pnl:.2f} "
+                        f"(+{self.take_profit_pct:.0%} target hit)"
+                    )
+
+                return {
+                    "status": "take_profit",
+                    "pnl": unrealized_pnl,
+                    "threshold": take_profit_threshold,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                }
+
+            # 3. Time-based exit check (skip if disabled with -1)
             entry_time = self._get_trade_entry_time()
             if entry_time and self.max_trade_duration_hours > 0:
                 duration_hours = (datetime.now(timezone.utc) - entry_time).total_seconds() / 3600
@@ -259,6 +288,13 @@ class TradingManager:
                 f"{self.strategy.spread_pair.alt1}={alt1_price:.4f}, "
                 f"{self.strategy.spread_pair.alt2}={alt2_price:.4f}"
             )
+
+            # Check if spreads are out of historical range (stale formation)
+            out_of_range_result = self._check_spread_out_of_range(
+                btc_price, alt1_price, alt2_price
+            )
+            if out_of_range_result:
+                return out_of_range_result
 
             # Generate signal
             signal_obj = self.strategy.generate_signal(btc_price, alt1_price, alt2_price)
@@ -320,7 +356,12 @@ class TradingManager:
                         if not self._has_open_positions():
                             self.current_position = None
                         else:
-                            logger.warning("Failed to close positions before entering new trade")
+                            logger.error("Failed to close positions before entering new trade - ABORTING ENTRY")
+                            result = {
+                                "status": "error",
+                                "message": "Failed to close existing positions",
+                                "signal": signal
+                            }
 
                 # Only execute entry if no position exists (and not already set result above)
                 if result is None:
@@ -637,11 +678,17 @@ class TradingManager:
                 }
 
 
-        # RISK MANAGEMENT: Clear trade entry from state
-        self._clear_trade_entry()
+        # Check if all closes were successful
+        all_success = all(r.get("status") == "success" for r in results.values())
+        
+        if all_success:
+            # RISK MANAGEMENT: Clear trade entry from state only if fully closed
+            self._clear_trade_entry()
+        else:
+            logger.error("Failed to close all positions! Keeping trade entry in state.")
 
         return {
-            "status": "success" if all(r.get("status") == "success" for r in results.values()) else "partial",
+            "status": "success" if all_success else "partial",
             "signal": "CLOSE",
             "action": "close",
             "orders": results,
@@ -708,16 +755,23 @@ class TradingManager:
     def _has_open_positions(self) -> bool:
         """
         Check if any positions are open on Binance (queries actual positions).
+        
+        FAIL-SAFE: Returns True if API error occurs to prevent double-entry.
 
         Returns:
-            True if any position exists, False otherwise
+            True if any position exists OR if API error occurs, False otherwise
         """
         if self.strategy is None:
             return False
 
         positions = self.get_current_positions()
         for symbol, pos_data in positions.items():
-            if "error" not in pos_data and pos_data.get("position_amt", 0) != 0:
+            # If there's an API error, assume we might have a position (Fail Safe)
+            if "error" in pos_data:
+                logger.warning(f"API error for {symbol} in _has_open_positions, assuming True for safety")
+                return True
+                
+            if pos_data.get("position_amt", 0) != 0:
                 return True
         return False
 
@@ -927,7 +981,7 @@ class TradingManager:
         """Clear trade entry data from state file."""
         if not self.state_manager:
             return
-        
+
         try:
             state = self.state_manager.load_state()
             if state:
@@ -935,6 +989,87 @@ class TradingManager:
                 state.pop('trade_entry_capital', None)
                 self.state_manager.save_state(state)
                 logger.info("Cleared trade entry from state")
-            
+
         except Exception as e:
             logger.error(f"Error clearing trade entry: {e}", exc_info=True)
+
+    def _check_spread_out_of_range(
+        self, btc_price: float, alt1_price: float, alt2_price: float
+    ) -> Optional[Dict]:
+        """
+        Check if current spreads are outside the historical formation range.
+
+        If spreads are out of range, the copula calibration is stale and formation
+        needs to be re-run. This closes any open positions and signals for re-formation.
+
+        Args:
+            btc_price: Current BTC price
+            alt1_price: Current ALT1 price
+            alt2_price: Current ALT2 price
+
+        Returns:
+            Dict with status="out_of_range" if spreads are outside historical range,
+            None otherwise (continue normal processing)
+        """
+        if self.strategy is None:
+            return None
+
+        spread_pair = self.strategy.spread_pair
+
+        # Calculate current spreads
+        s1_current = btc_price - spread_pair.beta1 * alt1_price
+        s2_current = btc_price - spread_pair.beta2 * alt2_price
+
+        # Get historical range
+        s1_min, s1_max = spread_pair.spread1_data.min(), spread_pair.spread1_data.max()
+        s2_min, s2_max = spread_pair.spread2_data.min(), spread_pair.spread2_data.max()
+
+        # Check if either spread is outside historical range
+        s1_out = s1_current < s1_min or s1_current > s1_max
+        s2_out = s2_current < s2_min or s2_current > s2_max
+
+        if not (s1_out or s2_out):
+            return None  # Spreads are in range, continue normal processing
+
+        # Log which spread(s) are out of range
+        out_of_range_details = []
+        if s1_out:
+            out_of_range_details.append(
+                f"S1={s1_current:.2f} outside [{s1_min:.2f}, {s1_max:.2f}]"
+            )
+        if s2_out:
+            out_of_range_details.append(
+                f"S2={s2_current:.2f} outside [{s2_min:.2f}, {s2_max:.2f}]"
+            )
+
+        logger.warning(
+            f"📊 SPREAD OUT OF RANGE: {', '.join(out_of_range_details)}. "
+            f"Copula calibration is stale - need to re-run formation."
+        )
+
+        # Close any open positions
+        unrealized_pnl = 0.0
+        if self._has_open_positions():
+            unrealized_pnl = self._get_position_pnl()
+            logger.info(f"Closing positions before formation re-run (PnL=${unrealized_pnl:.2f})")
+            self._close_positions()
+            self._clear_trade_entry()
+            self.current_position = None
+
+        # Send Telegram notification
+        if self.telegram_notifier:
+            self.telegram_notifier.send_message(
+                f"📊 SPREAD OUT OF RANGE: {', '.join(out_of_range_details)}\n"
+                f"Closing positions (PnL=${unrealized_pnl:.2f}) and re-running formation."
+            )
+
+        return {
+            "status": "out_of_range",
+            "action": "trigger_formation",
+            "s1_current": s1_current,
+            "s2_current": s2_current,
+            "s1_range": [s1_min, s1_max],
+            "s2_range": [s2_min, s2_max],
+            "pnl": unrealized_pnl,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }

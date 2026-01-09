@@ -97,7 +97,9 @@ def initialize_components():
         telegram_notifier=telegram_notifier,
         state_manager=state_manager,
         stop_loss_pct=config.risk_management.stop_loss_pct,
+        take_profit_pct=config.risk_management.take_profit_pct,
         max_trade_duration_hours=config.risk_management.max_trade_duration_hours,
+        cooldown_minutes=config.risk_management.cooldown_minutes,
     )
 
     logger.info("All components initialized successfully")
@@ -190,6 +192,11 @@ def run_trading_cycle():
         # Update position state if changed
         if result.get("action") in ["entry", "close"]:
             state_manager.update_position_state(trading_manager.current_position)
+
+        # Check if formation needs to be re-run (spread out of range)
+        if result.get("status") == "out_of_range":
+            logger.info("Spread out of range detected - triggering immediate formation re-run")
+            run_formation_phase()
 
     except Exception as e:
         logger.error(f"Error in trading cycle: {e}", exc_info=True)
