@@ -30,6 +30,21 @@ class TelegramNotifier:
         else:
             logger.info("Telegram notifications disabled")
 
+    def send_message(self, message: str) -> None:
+        """
+        Send a custom message via Telegram.
+
+        Args:
+            message: Message text to send
+        """
+        if not self.enabled:
+            return
+
+        try:
+            self._send_message(message)
+        except Exception as e:
+            logger.error(f"Error sending Telegram message: {e}")
+
     def send_trading_update(
         self,
         positions: Dict,
