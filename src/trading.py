@@ -1031,6 +1031,14 @@ class TradingManager:
         if not (s1_out or s2_out):
             return None  # Spreads are in range, continue normal processing
 
+        # Only trigger out-of-range if we have open positions to protect
+        # If flat, allow trading to continue - the copula will just generate extreme signals
+        if not self._has_open_positions():
+            logger.info(
+                f"Spread out of range but no positions open - continuing normal trading"
+            )
+            return None
+
         # Log which spread(s) are out of range
         out_of_range_details = []
         if s1_out:
